@@ -1,0 +1,10 @@
+{{- include "anvilkit-agent-mcp.require" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "anvilkit-agent-mcp.fullname" . }}
+  labels:
+    {{- include "anvilkit-agent-mcp.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- toYaml .Values.config | nindent 4 }}

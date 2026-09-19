@@ -1,0 +1,161 @@
+# Chart values of anvilkit-agent-mcp. Only what this service needs: its
+# image, its reviewed configuration file, the allowlisted placement
+# overrides, the Secrets it reads its credentials from, probes, resources
+# and the owner queue relay sidecar (P14: the relay of this owner's
+# background.requested events into its BullMQ queues, run beside the service
+# from the background-worker image with the relay role). Environment values
+# (addresses, replica counts, Secret names, the pinned image digests) are
+# supplied by the deploying repository per environment; secrets never enter
+# this chart.
+
+image:
+  repository: anvilkit-agent-mcp
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+
+# The gRPC listener inside the Pod (ANVILKIT_MCP_LISTEN) and the plaintext
+# probe/metrics listener (ANVILKIT_MCP_HEALTH_LISTEN).
+listen:
+  address: 0.0.0.0
+  port: 9106
+health:
+  port: 9116
+
+# The application-role connection: a Secret mounted as a file
+# (ANVILKIT_MCP_DATABASE_URL_FILE) so a rotated secret publishes a new
+# configuration generation without a restart. Required; never created here.
+database:
+  secret:
+    name: ""
+    key: url
+
+# The JetStream placement of the in-process forwarder (ANVILKIT_MCP_NATS_URL). Required.
+nats:
+  url: ""
+
+# The Control placement of the original-dispatch query (ANVILKIT_MCP_CONTROL_ADDRESS); optional.
+control:
+  address: ""
+
+# The owner queue relay sidecar (the background-worker image's relay entry):
+# consumes this owner's background.requested subject with the fixed durable
+# consumer, commits inbox entries with the relay role, enqueues into this
+# owner's BullMQ queues on the queue Valkey and reconstructs missing entries
+# from the durable requests. Its database URL (relay role) and its queue
+# Valkey URL are secrets read from existing Secrets.
+relay:
+  enabled: true
+  image:
+    repository: anvilkit-agent-background-worker
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  database:
+    secret:
+      name: ""
+      key: url
+  queue:
+    secret:
+      name: ""
+      key: url
+  healthPort: 9126
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# The reviewed, secret-free configuration file (config.yaml sections),
+# rendered into a ConfigMap and mounted at ANVILKIT_MCP_CONFIG.
+config:
+  grpc:
+    listen: 127.0.0.1:9106
+    capacity: 64
+    shutdown_timeout: 20s
+  health:
+    listen: 127.0.0.1:9116
+  database:
+    max_conn: 8
+  tasks:
+    max_input_bytes: 65536
+    max_lease: 10m
+    retry_delay: 5s
+    max_attempts: 3
+    sweep_interval: 2s
+  outbox:
+    forwarder_enabled: true
+    consumer_group: anvilkit-agent-mcp-forwarder
+    poll_interval: 500ms
+    ack_deadline: 30s
+    resend_interval: 1s
+    batch_size: 100
+    nats:
+      publish_timeout: 5s
+      name: anvilkit-agent-mcp
+  control:
+    timeout: 5s
+  apollo:
+    mode: disabled
+    app_id: anvilkit-agent-mcp
+  reload:
+    interval: 2s
+    drain_limit: 30s
+
+service:
+  type: ClusterIP
+  port: 9106
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: "1"
+    memory: 256Mi
+
+probes:
+  startup:
+    periodSeconds: 2
+    failureThreshold: 30
+  readiness:
+    periodSeconds: 5
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 10
+    failureThreshold: 3
+
+# Derived from the drains: the gRPC drain, the loops and the generation
+# retire are bounded by config; the grace period must exceed their sum.
+terminationGracePeriodSeconds: 90
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+podLabels: {}
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []

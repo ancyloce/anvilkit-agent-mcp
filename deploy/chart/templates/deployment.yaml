@@ -1,0 +1,174 @@
+{{- include "anvilkit-agent-mcp.require" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "anvilkit-agent-mcp.fullname" . }}
+  labels:
+    {{- include "anvilkit-agent-mcp.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "anvilkit-agent-mcp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "anvilkit-agent-mcp.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mcp
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ toYaml .Values.config | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "anvilkit-agent-mcp.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      # No injected service-link variables: the configuration loader rejects
+      # any ANVILKIT_MCP_* variable outside its allowlist.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mcp
+          image: {{ include "anvilkit-agent-mcp.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: ANVILKIT_MCP_CONFIG
+              value: /etc/anvilkit/anvilkit-agent-mcp/config.yaml
+            - name: ANVILKIT_MCP_LISTEN
+              value: {{ printf "%s:%d" .Values.listen.address (int .Values.listen.port) | quote }}
+            - name: ANVILKIT_MCP_HEALTH_LISTEN
+              value: {{ printf "%s:%d" .Values.listen.address (int .Values.health.port) | quote }}
+            # The secret as a mounted file: the kubelet refreshes it when the
+            # Secret changes and the generation watcher publishes the new
+            # generation (a new pool, probed, then the old one drained).
+            - name: ANVILKIT_MCP_DATABASE_URL_FILE
+              value: /var/run/secrets/anvilkit/database/{{ .Values.database.secret.key }}
+            - name: ANVILKIT_MCP_NATS_URL
+              value: {{ .Values.nats.url | quote }}
+            {{- if .Values.control.address }}
+            - name: ANVILKIT_MCP_CONTROL_ADDRESS
+              value: {{ .Values.control.address | quote }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.listen.port }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.health.port }}
+              protocol: TCP
+          startupProbe:
+            grpc:
+              port: {{ .Values.listen.port }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/anvilkit/anvilkit-agent-mcp
+              readOnly: true
+            - name: database
+              mountPath: /var/run/secrets/anvilkit/database
+              readOnly: true
+        {{- if .Values.relay.enabled }}
+        - name: relay
+          image: {{ include "anvilkit-agent-mcp.relayImage" . | quote }}
+          imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
+          args: ["relay"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: ANVILKIT_BACKGROUND_WORKER_CONFIG
+              value: /etc/anvilkit/anvilkit-agent-background-worker/config.yaml
+            - name: ANVILKIT_BACKGROUND_WORKER_RELAY_OWNER
+              value: mcp
+            - name: ANVILKIT_BACKGROUND_WORKER_MCP_ADDRESS
+              value: {{ printf "127.0.0.1:%d" (int .Values.listen.port) | quote }}
+            - name: ANVILKIT_BACKGROUND_WORKER_HEALTH_LISTEN
+              value: {{ printf "%s:%d" .Values.listen.address (int .Values.relay.healthPort) | quote }}
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_URL
+              value: {{ .Values.nats.url | quote }}
+            - name: ANVILKIT_BACKGROUND_WORKER_RELAY_DATABASE_URL_FILE
+              value: /var/run/secrets/anvilkit/relay-database/{{ .Values.relay.database.secret.key }}
+            - name: ANVILKIT_BACKGROUND_WORKER_QUEUE_URL_FILE
+              value: /var/run/secrets/anvilkit/queue/{{ .Values.relay.queue.secret.key }}
+          ports:
+            - name: relay-health
+              containerPort: {{ .Values.relay.healthPort }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: relay-health
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: relay-health
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.relay.resources | nindent 12 }}
+          volumeMounts:
+            - name: relay-database
+              mountPath: /var/run/secrets/anvilkit/relay-database
+              readOnly: true
+            - name: queue
+              mountPath: /var/run/secrets/anvilkit/queue
+              readOnly: true
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "anvilkit-agent-mcp.fullname" . }}
+        - name: database
+          secret:
+            secretName: {{ .Values.database.secret.name }}
+        {{- if .Values.relay.enabled }}
+        - name: relay-database
+          secret:
+            secretName: {{ .Values.relay.database.secret.name }}
+        - name: queue
+          secret:
+            secretName: {{ .Values.relay.queue.secret.name }}
+        {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
