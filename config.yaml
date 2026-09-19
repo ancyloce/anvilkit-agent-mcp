@@ -1,0 +1,58 @@
+# Reviewed configuration of anvilkit-agent-mcp (DD-09 §4, A09): the
+# secret-free, placement-free part of a configuration generation. Precedence
+# is defaults < this file < a validated Apollo snapshot (non-secret keys,
+# ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE with apollo.mode: snapshot) < the
+# allowlisted environment: ANVILKIT_MCP_LISTEN, ANVILKIT_MCP_HEALTH_LISTEN,
+# ANVILKIT_MCP_DATABASE_URL or ANVILKIT_MCP_DATABASE_URL_FILE (the secret,
+# environment or mounted file only), ANVILKIT_MCP_NATS_URL,
+# ANVILKIT_MCP_CONTROL_ADDRESS, ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE. Any other
+# ANVILKIT_MCP_* variable, any unknown key here and any secret or placement
+# key here rejects the candidate before anything starts.
+#
+# P14 scope: the BackgroundTaskService owner (claims, heartbeats, result
+# acceptance, lease sweep, cancellation), the transactional outbox and its
+# in-process forwarder. The catalog, grants and tool calls arrive with
+# P18/P19; DEVELOPMENT_ONLY bounds below are not production capacity.
+grpc:
+  listen: 127.0.0.1:9106
+  capacity: 64
+  shutdown_timeout: 20s
+health:
+  listen: 127.0.0.1:9116
+database:
+  max_conn: 8
+tasks:
+  # DEVELOPMENT_ONLY bounds of the background lane (ENV-05 fixes the real
+  # ones): the largest ClaimTaskResponse.input, the longest lease a worker
+  # may ask for, the retry delay and bound of one generation, the sweep
+  # interval that expires leases.
+  max_input_bytes: 65536
+  max_lease: 10m
+  retry_delay: 5s
+  max_attempts: 3
+  sweep_interval: 2s
+outbox:
+  # The in-process watermill forwarder: the watermill-sql subscriber over
+  # outbox/outbox_offsets (consumer group = the offsets row it owns) and the
+  # JetStream publisher (ANVILKIT_MCP_NATS_URL).
+  forwarder_enabled: true
+  consumer_group: anvilkit-agent-mcp-forwarder
+  poll_interval: 500ms
+  ack_deadline: 30s
+  resend_interval: 1s
+  batch_size: 100
+  nats:
+    publish_timeout: 5s
+    name: anvilkit-agent-mcp
+control:
+  # The original-dispatch query of an external-effect lease
+  # (ANVILKIT_MCP_CONTROL_ADDRESS); without it such a lease is never reassigned.
+  timeout: 5s
+apollo:
+  mode: disabled
+  app_id: anvilkit-agent-mcp
+reload:
+  # The generation watcher: re-reads the secret file and the snapshot at this
+  # interval; a replaced generation's old clients drain within drain_limit.
+  interval: 2s
+  drain_limit: 30s

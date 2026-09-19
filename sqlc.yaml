@@ -1,0 +1,19 @@
+# sqlc (A06): reviewed SQL is primary. The schema is the anvilkit_mcp
+# migration source, which still lives in the parent repository's migration
+# Job (jobs/migration/internal/migrate/sql/mcp) until MCP owns its
+# migrations; the drift check therefore needs the parent checkout (or
+# ANVILKIT_MCP_MIGRATIONS_DIR) around this repository. Generated code lands
+# in internal/adapters/postgres/sqlc and is regenerated and drift-checked by
+# tools/sqlc.sh.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: schema
+    queries: internal/adapters/postgres/queries
+    gen:
+      go:
+        package: sqlc
+        out: internal/adapters/postgres/sqlc
+        sql_package: pgx/v5
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
