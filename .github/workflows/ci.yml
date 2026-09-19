@@ -1,0 +1,67 @@
+# Independent verification of anvilkit-agent-mcp from this repository alone:
+# build, vet, test (Docker-backed PostgreSQL 17 tests through Testcontainers;
+# they need the anvilkit_mcp migrations, which still live in the parent
+# repository's migration Job until MCP owns them — the checkout of
+# anvilkit-services below supplies them read-only), the race check of the
+# application, domain and transport, the sqlc drift check, the image from
+# the repository root, and the chart's lint and render. GOWORK=off: the
+# contract module is a versioned requirement.
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+env:
+  GOWORK: "off"
+  GOFLAGS: "-mod=readonly"
+  ANVILKIT_MCP_MIGRATIONS_DIR: ${{ github.workspace }}/parent/jobs/migration/internal/migrate/sql/mcp
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ancyloce/anvilkit-services
+          path: parent
+          sparse-checkout: jobs/migration/internal/migrate/sql/mcp
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.0"
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - run: go test -race -count=1 ./internal/application/... ./internal/transport/... ./internal/domain/...
+  sqlc:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ancyloce/anvilkit-services
+          path: parent
+          sparse-checkout: jobs/migration/internal/migrate/sql/mcp
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.0"
+      - run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.27.0
+      - run: sh tools/sqlc.sh --check
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t anvilkit-agent-mcp:ci .
+  chart:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: "v3.19.0"
+      - run: >-
+          helm lint deploy/chart --set database.secret.name=mcp-database --set nats.url=nats://nats:4222
+          --set relay.database.secret.name=mcp-relay-database --set relay.queue.secret.name=queue-valkey
+      - run: >-
+          helm template anvilkit-agent-mcp deploy/chart --set database.secret.name=mcp-database --set nats.url=nats://nats:4222
+          --set relay.database.secret.name=mcp-relay-database --set relay.queue.secret.name=queue-valkey > /dev/null
