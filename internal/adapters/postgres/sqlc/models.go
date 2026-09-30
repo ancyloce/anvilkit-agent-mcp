@@ -35,6 +35,16 @@ type BackgroundRequest struct {
 	CompletedAt      pgtype.Timestamptz
 }
 
+type CatalogCommand struct {
+	TenantID      string
+	CommandID     string
+	CommandKind   string
+	RequestDigest string
+	ServerID      string
+	Revision      int64
+	CreatedAt     pgtype.Timestamptz
+}
+
 type Descriptor struct {
 	ServerID         string
 	Revision         int64
@@ -47,28 +57,61 @@ type Descriptor struct {
 	RequestDigest    string
 	CreatedAt        pgtype.Timestamptz
 	UpdatedAt        pgtype.Timestamptz
+	ServerName       string
+	ServerVersion    string
+	Resources        []byte
+	Prompts          []byte
+	ResourcesDigest  string
+	PromptsDigest    string
+	DataClass        string
+	NetworkScope     []string
+	Licenses         []string
+	Issuer           string
+	RevisionEvidence string
+	ConnectionRef    string
+	DiscoveredBy     string
+	Reviewer         *string
+	ReviewID         *string
 }
 
 type Grant struct {
-	GrantID            string
-	Revision           int64
-	TenantID           string
-	SubjectType        string
-	SubjectID          string
-	ServerID           string
-	DescriptorRevision int64
-	DescriptorDigest   string
-	Methods            []string
-	Purpose            string
-	CostCapCurrency    string
-	CostCapAmount      int64
-	State              string
-	ControlReceiptID   *string
-	ExpiresAt          pgtype.Timestamptz
-	CommandID          string
-	RequestDigest      string
-	CreatedAt          pgtype.Timestamptz
-	UpdatedAt          pgtype.Timestamptz
+	GrantID               string
+	Revision              int64
+	TenantID              string
+	SubjectType           string
+	SubjectID             string
+	ServerID              string
+	DescriptorRevision    int64
+	DescriptorDigest      string
+	Methods               []string
+	Purpose               string
+	CostCapCurrency       string
+	CostCapAmount         int64
+	State                 string
+	ControlReceiptID      *string
+	ExpiresAt             pgtype.Timestamptz
+	CommandID             string
+	RequestDigest         string
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
+	CanonicalResource     string
+	Transport             string
+	ProtocolVersion       string
+	Issuer                string
+	Audience              string
+	ResourceSelectors     []string
+	PromptSelectors       []string
+	DataClass             string
+	PolicyDigest          string
+	PolicyEpoch           *int64
+	FailureCode           *string
+	RegistrationCommandID string
+	RevocationCommandID   *string
+	FencedAt              pgtype.Timestamptz
+	InFlightCalls         int64
+	UnknownCalls          int64
+	ControlState          string
+	RevokedAt             pgtype.Timestamptz
 }
 
 type GrantDecision struct {
@@ -82,6 +125,7 @@ type GrantDecision struct {
 	CommandID     string
 	RequestDigest string
 	DecidedAt     pgtype.Timestamptz
+	TenantID      string
 }
 
 type Inbox struct {
@@ -118,6 +162,7 @@ type Review struct {
 	CommandID        string
 	RequestDigest    string
 	DecidedAt        pgtype.Timestamptz
+	TenantID         string
 }
 
 type Server struct {
@@ -141,25 +186,41 @@ type TaskAttempt struct {
 }
 
 type ToolRequest struct {
-	CallID             string
-	TenantID           string
-	GrantID            string
-	GrantRevision      int64
-	ServerID           string
-	DescriptorRevision int64
-	Method             string
-	ArgumentRef        string
-	ArgumentDigest     string
-	OperationID        *string
-	AttemptID          *string
-	State              string
-	ControlDispatchID  *string
-	ResultRef          *string
-	ResultDigest       *string
-	FailureCode        *string
-	CommandID          string
-	RequestDigest      string
-	Deadline           pgtype.Timestamptz
-	CreatedAt          pgtype.Timestamptz
-	UpdatedAt          pgtype.Timestamptz
+	CallID              string
+	TenantID            string
+	GrantID             string
+	GrantRevision       int64
+	ServerID            string
+	DescriptorRevision  int64
+	Method              string
+	ArgumentRef         string
+	ArgumentDigest      string
+	OperationID         *string
+	AttemptID           *string
+	State               string
+	ControlDispatchID   *string
+	ResultRef           *string
+	ResultDigest        *string
+	FailureCode         *string
+	CommandID           string
+	RequestDigest       string
+	Deadline            pgtype.Timestamptz
+	CreatedAt           pgtype.Timestamptz
+	UpdatedAt           pgtype.Timestamptz
+	InstanceID          string
+	ExecutionEpoch      int64
+	Arguments           []byte
+	DescriptorDigest    string
+	ProtocolVersion     string
+	Transport           string
+	Route               string
+	SideEffecting       bool
+	ExposureCurrency    string
+	ExposureAmount      int64
+	SendMarkerAt        pgtype.Timestamptz
+	ObservedAt          pgtype.Timestamptz
+	ObservationSequence int64
+	UsageUnits          *int64
+	NativeEvidence      []byte
+	Result              []byte
 }

@@ -6,6 +6,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -159,8 +160,9 @@ func InsertParams(t domain.Task) sqlc.InsertRequestParams {
 
 // GrantAuthorization answers the owner's current authorization for a
 // grant:<grant_id> reference from the grants table of this transaction: an
-// active grant is current; a revoked, revoking, expired, pending, failed or
-// missing one is not (DD-08; the P18 grant lifecycle writes the rows).
+// ACTIVE grant with Control's receipt whose expiry (if any) lies ahead is
+// current; a revoked, revoking, expired, pending, failed or missing one is
+// not (DD-08 §2: the same rule as domain.Grant.Executable).
 func GrantAuthorization(ctx context.Context, q *sqlc.Queries, ref, tenantID string, now func() time.Time) (domain.AuthorizationState, error) {
 	const prefix = "grant:"
 	if len(ref) <= len(prefix) || ref[:len(prefix)] != prefix {
@@ -173,8 +175,93 @@ func GrantAuthorization(ctx context.Context, q *sqlc.Queries, ref, tenantID stri
 	if err != nil {
 		return domain.AuthorizationRevoked, err
 	}
-	if grant.TenantID == tenantID && grant.State == "active" && grant.ExpiresAt.Valid && now().Before(grant.ExpiresAt.Time) {
+	if grant.TenantID == tenantID && grant.State == "active" && grant.ControlReceiptID != nil && (!grant.ExpiresAt.Valid || now().Before(grant.ExpiresAt.Time)) {
 		return domain.AuthorizationCurrent, nil
 	}
 	return domain.AuthorizationRevoked, nil
+}
+
+// DescriptorFromRow maps a descriptor row (and its server) to the domain.
+func DescriptorFromRow(r sqlc.Descriptor, s sqlc.Server) (domain.Descriptor, error) {
+	d := domain.Descriptor{
+		ServerID: r.ServerID, TenantID: s.TenantID, Revision: uint64(r.Revision), CanonicalResource: s.CanonicalResource, Transport: s.Transport,
+		ProtocolVersion: r.ProtocolVersion, Provenance: r.Provenance, Digest: r.DescriptorDigest, ResourcesDigest: r.ResourcesDigest,
+		PromptsDigest: r.PromptsDigest, ServerName: r.ServerName, ServerVersion: r.ServerVersion, DataClass: r.DataClass, NetworkScope: r.NetworkScope,
+		Licenses: r.Licenses, Issuer: r.Issuer, RevisionEvidence: r.RevisionEvidence, ConnectionRef: r.ConnectionRef, State: domain.CatalogState(r.State),
+		DiscoveredBy: r.DiscoveredBy, Reviewer: str(r.Reviewer), ReviewID: str(r.ReviewID), CreatedAt: ts(r.CreatedAt), UpdatedAt: ts(r.UpdatedAt),
+	}
+	for raw, into := range map[*[]byte]any{&r.Tools: &d.Tools, &r.Resources: &d.Resources, &r.Prompts: &d.Prompts} {
+		if len(*raw) > 0 {
+			if err := json.Unmarshal(*raw, into); err != nil {
+				return domain.Descriptor{}, fmt.Errorf("descriptor %s/%d: %w", r.ServerID, r.Revision, err)
+			}
+		}
+	}
+	return d, nil
+}
+
+// GrantFromRow maps a grant row to the domain.
+func GrantFromRow(r sqlc.Grant) domain.Grant {
+	g := domain.Grant{
+		GrantID: r.GrantID, Revision: uint64(r.Revision), TenantID: r.TenantID, SubjectType: r.SubjectType, SubjectID: r.SubjectID, ServerID: r.ServerID,
+		DescriptorRevision: uint64(r.DescriptorRevision), DescriptorDigest: r.DescriptorDigest, CanonicalResource: r.CanonicalResource, Transport: r.Transport,
+		ProtocolVersion: r.ProtocolVersion, Issuer: r.Issuer, Audience: r.Audience, Methods: r.Methods, ResourceSelectors: r.ResourceSelectors,
+		PromptSelectors: r.PromptSelectors, Purpose: r.Purpose, DataClass: r.DataClass, CostCap: domain.Money{Currency: r.CostCapCurrency, Amount: r.CostCapAmount},
+		PolicyDigest: r.PolicyDigest, State: domain.GrantState(r.State), ControlReceiptID: str(r.ControlReceiptID), FailureCode: str(r.FailureCode),
+		RegistrationCmdID: r.RegistrationCommandID, RevocationCmdID: str(r.RevocationCommandID), InFlightCalls: uint64(r.InFlightCalls),
+		UnknownCalls: uint64(r.UnknownCalls), ControlState: r.ControlState, CommandID: r.CommandID, RequestDigest: r.RequestDigest,
+		CreatedAt: ts(r.CreatedAt), UpdatedAt: ts(r.UpdatedAt),
+	}
+	if r.PolicyEpoch != nil {
+		g.PolicyEpoch = uint64(*r.PolicyEpoch)
+	}
+	for src, dst := range map[*pgtype.Timestamptz]**time.Time{&r.ExpiresAt: &g.ExpiresAt, &r.FencedAt: &g.FencedAt, &r.RevokedAt: &g.RevokedAt} {
+		if src.Valid {
+			at := src.Time
+			*dst = &at
+		}
+	}
+	return g
+}
+
+// BarrierParams renders the barrier columns of a grant for the guarded
+// update (the expected state is the one the transaction read).
+func BarrierParams(g domain.Grant, expected domain.GrantState) sqlc.UpdateGrantBarrierParams {
+	p := sqlc.UpdateGrantBarrierParams{
+		GrantID: g.GrantID, State: string(g.State), ControlReceiptID: optStr(g.ControlReceiptID), FailureCode: optStr(g.FailureCode),
+		RevocationCommandID: optStr(g.RevocationCmdID), FencedAt: optTs(g.FencedAt), InFlightCalls: int64(g.InFlightCalls),
+		UnknownCalls: int64(g.UnknownCalls), ControlState: g.ControlState, RevokedAt: optTs(g.RevokedAt), ExpectedState: string(expected),
+	}
+	if g.PolicyEpoch != 0 {
+		e := int64(g.PolicyEpoch)
+		p.PolicyEpoch = &e
+	}
+	return p
+}
+
+func optTime(t pgtype.Timestamptz) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	v := t.Time.UTC()
+	return &v
+}
+
+// CallFromRow maps a tool request row.
+func CallFromRow(r sqlc.ToolRequest) domain.Call {
+	c := domain.Call{
+		CallID: r.CallID, TenantID: r.TenantID, GrantID: r.GrantID, GrantRevision: uint64(r.GrantRevision), ServerID: r.ServerID,
+		DescriptorRevision: uint64(r.DescriptorRevision), DescriptorDigest: r.DescriptorDigest, ProtocolVersion: r.ProtocolVersion, Transport: r.Transport,
+		Route: r.Route, Method: r.Method, SideEffecting: r.SideEffecting, Exposure: domain.Money{Currency: r.ExposureCurrency, Amount: r.ExposureAmount},
+		ArgumentRef: r.ArgumentRef, ArgumentDigest: r.ArgumentDigest, Arguments: r.Arguments, OperationID: str(r.OperationID), AttemptID: str(r.AttemptID),
+		InstanceID: r.InstanceID, ExecutionEpoch: uint64(r.ExecutionEpoch), State: domain.CallState(r.State), DispatchID: str(r.ControlDispatchID),
+		FailureCode: str(r.FailureCode), Result: r.Result, ResultDigest: str(r.ResultDigest), ResultRef: str(r.ResultRef),
+		SendMarkerAt: optTime(r.SendMarkerAt), ObservedAt: optTime(r.ObservedAt), ObservationSeq: uint64(r.ObservationSequence),
+		CommandID: r.CommandID, RequestDigest: r.RequestDigest, Deadline: ts(r.Deadline), CreatedAt: ts(r.CreatedAt), UpdatedAt: ts(r.UpdatedAt),
+	}
+	if r.UsageUnits != nil {
+		u := uint64(*r.UsageUnits)
+		c.UsageUnits = &u
+	}
+	return c
 }

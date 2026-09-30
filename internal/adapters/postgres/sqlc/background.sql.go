@@ -74,19 +74,25 @@ func (q *Queries) CountRequestsByState(ctx context.Context) ([]CountRequestsBySt
 }
 
 const getGrantState = `-- name: GetGrantState :one
-SELECT tenant_id, state, expires_at FROM grants WHERE grant_id = $1 FOR SHARE
+SELECT tenant_id, state, expires_at, control_receipt_id FROM grants WHERE grant_id = $1 FOR SHARE
 `
 
 type GetGrantStateRow struct {
-	TenantID  string
-	State     string
-	ExpiresAt pgtype.Timestamptz
+	TenantID         string
+	State            string
+	ExpiresAt        pgtype.Timestamptz
+	ControlReceiptID *string
 }
 
 func (q *Queries) GetGrantState(ctx context.Context, grantID string) (GetGrantStateRow, error) {
 	row := q.db.QueryRow(ctx, getGrantState, grantID)
 	var i GetGrantStateRow
-	err := row.Scan(&i.TenantID, &i.State, &i.ExpiresAt)
+	err := row.Scan(
+		&i.TenantID,
+		&i.State,
+		&i.ExpiresAt,
+		&i.ControlReceiptID,
+	)
 	return i, err
 }
 

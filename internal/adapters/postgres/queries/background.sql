@@ -39,7 +39,7 @@ UPDATE task_attempts SET outcome = $4, submitted_at = $5 WHERE task_id = $1 AND 
 SELECT task_id, generation FROM background_requests WHERE state = 'leased' AND lease_until < $1 ORDER BY lease_until LIMIT $2;
 
 -- name: GetGrantState :one
-SELECT tenant_id, state, expires_at FROM grants WHERE grant_id = $1 FOR SHARE;
+SELECT tenant_id, state, expires_at, control_receipt_id FROM grants WHERE grant_id = $1 FOR SHARE;
 
 -- name: CountRequestsByState :many
 SELECT state, count(*) AS n FROM background_requests GROUP BY state;
