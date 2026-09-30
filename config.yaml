@@ -5,14 +5,20 @@
 # allowlisted environment: ANVILKIT_MCP_LISTEN, ANVILKIT_MCP_HEALTH_LISTEN,
 # ANVILKIT_MCP_DATABASE_URL or ANVILKIT_MCP_DATABASE_URL_FILE (the secret,
 # environment or mounted file only), ANVILKIT_MCP_NATS_URL,
-# ANVILKIT_MCP_CONTROL_ADDRESS, ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE. Any other
+# ANVILKIT_MCP_CONTROL_ADDRESS, ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE,
+# ANVILKIT_MCP_UPSTREAM_CREDENTIALS_FILE (P19, the mounted upstream credential
+# bindings). Any other
 # ANVILKIT_MCP_* variable, any unknown key here and any secret or placement
 # key here rejects the candidate before anything starts.
 #
 # P14 scope: the BackgroundTaskService owner (claims, heartbeats, result
 # acceptance, lease sweep, cancellation), the transactional outbox and its
-# in-process forwarder. The catalog, grants and tool calls arrive with
-# P18/P19; DEVELOPMENT_ONLY bounds below are not production capacity.
+# in-process forwarder. P18: the private catalog through the ContextForge
+# connection layer (ANVILKIT_MCP_CONTEXTFORGE_URL and the mounted token
+# ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE), the role bindings
+# (ANVILKIT_MCP_ROLES_FILE) and the grant barrier with Control
+# (ANVILKIT_MCP_CONTROL_ADDRESS). P19: guarded tool calls (calls.*); DEVELOPMENT_ONLY
+# bounds below are not production capacity.
 grpc:
   listen: 127.0.0.1:9106
   capacity: 64
@@ -56,3 +62,39 @@ reload:
   # interval; a replaced generation's old clients drain within drain_limit.
   interval: 2s
   drain_limit: 30s
+catalog:
+  # ContextForge answers discovery (handshake, gateway registration, tool,
+  # resource and prompt listings); a discovery can take as long as the
+  # upstream's handshake.
+  contextforge:
+    timeout: 60s
+  # The reviewed discovery allowlist: exact hosts or ".suffix" patterns.
+  # Empty: nothing is discoverable. private_hosts (DEVELOPMENT_ONLY) may use
+  # http and resolve to loopback/private addresses.
+  allowed_hosts: []
+  private_hosts: []
+barrier:
+  # Open grant barriers (uncertain registrations, unconfirmed fences,
+  # converging revocations) untouched for reconcile_age are advanced every
+  # reconcile_interval under their original command identities.
+  reconcile_interval: 2s
+  reconcile_age: 5s
+calls:
+  # Guarded tool execution (P19). The reviewed qualified combinations of
+  # canonical resource, protocol version, transport and route; every other
+  # combination stays disabled. route: go-sdk (the official Go SDK v1.8.0
+  # over MCP's guarded egress) is the only selected route; stdio is not
+  # qualified. Each entry: {resource, protocol_version, transport, route}.
+  qualified_routes: []
+  # One send's bound (connect, qualification, tools/call); CreateCall waits
+  # up to `wait` for the outcome, the dispatch continues after that.
+  send_timeout: 60s
+  wait: 30s
+  # Every upstream response body (metadata, token, MCP) is bounded.
+  max_response_bytes: 1048576
+  # Open calls untouched for reconcile_age (more than send_timeout) are
+  # advanced every reconcile_interval: uncertain admissions asked again,
+  # admitted calls without a send marker canceled, marked calls without an
+  # outcome recorded UNKNOWN, UNKNOWN calls resolved from Control only.
+  reconcile_interval: 2s
+  reconcile_age: 2m
