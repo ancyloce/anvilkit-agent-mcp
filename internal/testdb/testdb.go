@@ -170,13 +170,16 @@ func (i *Instance) GrantFixture(t *testing.T, tenant, grantID, state string) {
 	t.Helper()
 	i.Admin(t,
 		fmt.Sprintf(`INSERT INTO servers (server_id, tenant_id, canonical_resource, transport) VALUES ('srv_%s', '%s', 'https://mcp.example/%s', 'streamable-http') ON CONFLICT DO NOTHING`, grantID, tenant, grantID),
-		fmt.Sprintf(`INSERT INTO descriptors (server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest) VALUES ('srv_%s', 1, '2025-06-18', 'test', 'sha256:%064d', '[]', 'approved', 'cmd_%s', 'sha256:%064d') ON CONFLICT DO NOTHING`, grantID, 1, grantID, 2),
-		fmt.Sprintf(`INSERT INTO grants (grant_id, tenant_id, subject_type, subject_id, server_id, descriptor_revision, descriptor_digest, methods, purpose, cost_cap_currency, cost_cap_amount, state, expires_at, command_id, request_digest) VALUES ('%s', '%s', 'actor', 'user_a', 'srv_%s', 1, 'sha256:%064d', '{tools/call}', 'test', 'USD', 0, '%s', now() + interval '1 year', 'cmd_grant_%s', 'sha256:%064d')`, grantID, tenant, grantID, 1, state, grantID, 3),
+		fmt.Sprintf(`INSERT INTO descriptors (server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest, data_class, revision_evidence, discovered_by, reviewer, review_id) VALUES ('srv_%s', 1, '2025-06-18', 'test', 'sha256:%064d', '[]', 'approved', 'cmd_%s', 'sha256:%064d', 'internal', 'fixture', 'fixture-discoverer', 'fixture-reviewer', 'rev_fixture') ON CONFLICT DO NOTHING`, grantID, 1, grantID, 2),
+		fmt.Sprintf(`INSERT INTO grants (grant_id, tenant_id, subject_type, subject_id, server_id, descriptor_revision, descriptor_digest, methods, purpose, cost_cap_currency, cost_cap_amount, state, expires_at, command_id, request_digest, canonical_resource, transport, protocol_version, audience, data_class, policy_digest, registration_command_id, control_receipt_id) VALUES ('%s', '%s', 'actor', 'user_a', 'srv_%s', 1, 'sha256:%064d', '{tools/call}', 'test', 'USD', 0, '%s', now() + interval '1 year', 'cmd_grant_%s', 'sha256:%064d', 'https://mcp.example/%s', 'streamable-http', '2025-06-18', 'https://mcp.example/%s', 'internal', 'sha256:%064d', 'reg_%s', 'rcpt_fixture')`, grantID, tenant, grantID, 1, state, grantID, 3, grantID, grantID, 4, grantID),
 	)
 }
 
 // SetGrantState changes a grant's state (revocation fixture).
 func (i *Instance) SetGrantState(t *testing.T, grantID, state string) {
 	t.Helper()
-	i.Admin(t, fmt.Sprintf(`UPDATE grants SET state = '%s' WHERE grant_id = '%s'`, state, grantID))
+	i.Admin(t, fmt.Sprintf(`UPDATE grants SET state = '%[1]s',
+		revocation_command_id = CASE WHEN '%[1]s' IN ('revoking', 'revoked') THEN 'rev_fixture' ELSE revocation_command_id END,
+		control_state = CASE WHEN '%[1]s' = 'revoked' THEN 'converged' ELSE control_state END,
+		revoked_at = CASE WHEN '%[1]s' = 'revoked' THEN now() ELSE revoked_at END WHERE grant_id = '%[2]s'`, state, grantID))
 }
