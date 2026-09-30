@@ -117,6 +117,57 @@ type Reload struct {
 	DrainLimit time.Duration `koanf:"drain_limit"`
 }
 
+// Catalog is the private catalog (P18, DD-08 §1): the ContextForge
+// placement and the mounted API token file (placements, environment only),
+// the reviewed discovery allowlist (exact hosts or ".suffix" patterns), the
+// DEVELOPMENT_ONLY private hosts that may use http and resolve to private
+// addresses, and the mounted role bindings file (DEVELOPMENT_ONLY until
+// IdP groups are the source). Without a ContextForge placement nothing is
+// discovered.
+type Catalog struct {
+	ContextForge ContextForge `koanf:"contextforge"`
+	AllowedHosts []string     `koanf:"allowed_hosts"`
+	PrivateHosts []string     `koanf:"private_hosts"`
+	RolesFile    string       `koanf:"roles_file"`
+}
+
+type ContextForge struct {
+	URL       string        `koanf:"url"`
+	TokenFile string        `koanf:"token_file"`
+	Timeout   time.Duration `koanf:"timeout"`
+}
+
+// Barrier governs the reconciliation of open grant barriers (uncertain
+// registrations, unconfirmed fences, converging revocations) with Control
+// and of expired grants.
+type Barrier struct {
+	ReconcileInterval time.Duration `koanf:"reconcile_interval"`
+	ReconcileAge      time.Duration `koanf:"reconcile_age"`
+}
+
+// Calls governs guarded tool execution (P19, DD-08 §3-§5): the reviewed
+// qualified (resource, protocol version, transport, route) combinations —
+// every other combination stays disabled —, the send bound, how long
+// CreateCall waits for an outcome, the response bound, the reconciliation
+// of open calls, and the mounted upstream credential bindings (placement,
+// environment only; DEVELOPMENT_ONLY list until the secret platform, ENV-02).
+type Calls struct {
+	QualifiedRoutes   []QualifiedRoute `koanf:"qualified_routes"`
+	SendTimeout       time.Duration    `koanf:"send_timeout"`
+	Wait              time.Duration    `koanf:"wait"`
+	MaxResponseBytes  int64            `koanf:"max_response_bytes"`
+	ReconcileInterval time.Duration    `koanf:"reconcile_interval"`
+	ReconcileAge      time.Duration    `koanf:"reconcile_age"`
+	CredentialsFile   string           `koanf:"credentials_file"`
+}
+
+type QualifiedRoute struct {
+	Resource        string `koanf:"resource"`
+	ProtocolVersion string `koanf:"protocol_version"`
+	Transport       string `koanf:"transport"`
+	Route           string `koanf:"route"`
+}
+
 type Config struct {
 	GRPC     GRPC     `koanf:"grpc"`
 	Health   Health   `koanf:"health"`
@@ -126,45 +177,63 @@ type Config struct {
 	Control  Control  `koanf:"control"`
 	Apollo   Apollo   `koanf:"apollo"`
 	Reload   Reload   `koanf:"reload"`
+	Catalog  Catalog  `koanf:"catalog"`
+	Barrier  Barrier  `koanf:"barrier"`
+	Calls    Calls    `koanf:"calls"`
 }
 
 var defaults = map[string]any{
-	"grpc.listen":                 "127.0.0.1:9106",
-	"grpc.capacity":               64,
-	"grpc.shutdown_timeout":       "20s",
-	"health.listen":               "127.0.0.1:9116",
-	"database.max_conn":           8,
-	"tasks.max_input_bytes":       65536,
-	"tasks.max_lease":             "10m",
-	"tasks.retry_delay":           "5s",
-	"tasks.max_attempts":          3,
-	"tasks.sweep_interval":        "2s",
-	"outbox.forwarder_enabled":    true,
-	"outbox.consumer_group":       "anvilkit-agent-mcp-forwarder",
-	"outbox.poll_interval":        "500ms",
-	"outbox.ack_deadline":         "30s",
-	"outbox.resend_interval":      "1s",
-	"outbox.batch_size":           100,
-	"outbox.nats.publish_timeout": "5s",
-	"outbox.nats.name":            "anvilkit-agent-mcp",
-	"control.timeout":             "5s",
-	"apollo.mode":                 ApolloDisabled,
-	"apollo.app_id":               "anvilkit-agent-mcp",
-	"reload.interval":             "2s",
-	"reload.drain_limit":          "30s",
+	"grpc.listen":                  "127.0.0.1:9106",
+	"grpc.capacity":                64,
+	"grpc.shutdown_timeout":        "20s",
+	"health.listen":                "127.0.0.1:9116",
+	"database.max_conn":            8,
+	"tasks.max_input_bytes":        65536,
+	"tasks.max_lease":              "10m",
+	"tasks.retry_delay":            "5s",
+	"tasks.max_attempts":           3,
+	"tasks.sweep_interval":         "2s",
+	"outbox.forwarder_enabled":     true,
+	"outbox.consumer_group":        "anvilkit-agent-mcp-forwarder",
+	"outbox.poll_interval":         "500ms",
+	"outbox.ack_deadline":          "30s",
+	"outbox.resend_interval":       "1s",
+	"outbox.batch_size":            100,
+	"outbox.nats.publish_timeout":  "5s",
+	"outbox.nats.name":             "anvilkit-agent-mcp",
+	"control.timeout":              "5s",
+	"apollo.mode":                  ApolloDisabled,
+	"apollo.app_id":                "anvilkit-agent-mcp",
+	"reload.interval":              "2s",
+	"reload.drain_limit":           "30s",
+	"catalog.contextforge.timeout": "60s",
+	"catalog.allowed_hosts":        []string{},
+	"catalog.private_hosts":        []string{},
+	"barrier.reconcile_interval":   "2s",
+	"barrier.reconcile_age":        "5s",
+	"calls.qualified_routes":       []map[string]any{},
+	"calls.send_timeout":           "60s",
+	"calls.wait":                   "30s",
+	"calls.max_response_bytes":     1048576,
+	"calls.reconcile_interval":     "2s",
+	"calls.reconcile_age":          "2m",
 }
 
 // envOverrides is the complete set of accepted environment variables:
 // deployment placement and the secrets. Any other ANVILKIT_MCP_* variable
 // rejects the candidate.
 var envOverrides = map[string]string{
-	"ANVILKIT_MCP_LISTEN":               "grpc.listen",
-	"ANVILKIT_MCP_HEALTH_LISTEN":        "health.listen",
-	"ANVILKIT_MCP_DATABASE_URL":         "database.url",
-	"ANVILKIT_MCP_DATABASE_URL_FILE":    "database.url_file",
-	"ANVILKIT_MCP_NATS_URL":             "outbox.nats.url",
-	"ANVILKIT_MCP_CONTROL_ADDRESS":      "control.address",
-	"ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE": "apollo.snapshot_file",
+	"ANVILKIT_MCP_LISTEN":                    "grpc.listen",
+	"ANVILKIT_MCP_HEALTH_LISTEN":             "health.listen",
+	"ANVILKIT_MCP_DATABASE_URL":              "database.url",
+	"ANVILKIT_MCP_DATABASE_URL_FILE":         "database.url_file",
+	"ANVILKIT_MCP_NATS_URL":                  "outbox.nats.url",
+	"ANVILKIT_MCP_CONTROL_ADDRESS":           "control.address",
+	"ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE":      "apollo.snapshot_file",
+	"ANVILKIT_MCP_CONTEXTFORGE_URL":          "catalog.contextforge.url",
+	"ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE":   "catalog.contextforge.token_file",
+	"ANVILKIT_MCP_ROLES_FILE":                "catalog.roles_file",
+	"ANVILKIT_MCP_UPSTREAM_CREDENTIALS_FILE": "calls.credentials_file",
 }
 
 // secretKeys may only arrive through the environment or the secret file.
@@ -172,7 +241,7 @@ var secretKeys = []string{"database.url"}
 
 // placementKeys are per-deployment values refused inside the reviewed file
 // and inside a snapshot (they identify an environment, never a release).
-var placementKeys = []string{"database.url_file", "outbox.nats.url", "control.address", "apollo.snapshot_file"}
+var placementKeys = []string{"database.url_file", "outbox.nats.url", "control.address", "apollo.snapshot_file", "catalog.contextforge.url", "catalog.contextforge.token_file", "catalog.roles_file", "calls.credentials_file"}
 
 // Generation is one complete, validated configuration: the typed snapshot,
 // its number in this process, the digest of every non-secret input as
@@ -376,6 +445,28 @@ func (c Config) validate() error {
 	check(c.Apollo.AppID != "", "apollo.app_id is required")
 	check(c.Reload.Interval > 0 && c.Reload.Interval <= time.Minute, "reload.interval must be within (0, 1m]")
 	check(c.Reload.DrainLimit > 0 && c.Reload.DrainLimit <= 10*time.Minute, "reload.drain_limit must be within (0, 10m]")
+	if c.Catalog.ContextForge.URL != "" {
+		u, err := url.Parse(c.Catalog.ContextForge.URL)
+		check(err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "", "catalog.contextforge.url must be an http(s) URL")
+		check(c.Catalog.ContextForge.TokenFile != "", "catalog.contextforge.token_file is required with catalog.contextforge.url (ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE)")
+	}
+	check(c.Catalog.ContextForge.Timeout > 0 && c.Catalog.ContextForge.Timeout <= 5*time.Minute, "catalog.contextforge.timeout must be within (0, 5m]")
+	check(c.Barrier.ReconcileInterval > 0 && c.Barrier.ReconcileInterval <= time.Minute, "barrier.reconcile_interval must be within (0, 1m]")
+	check(c.Barrier.ReconcileAge >= 0 && c.Barrier.ReconcileAge <= time.Hour, "barrier.reconcile_age must be within [0, 1h]")
+	check(c.Calls.SendTimeout > 0 && c.Calls.SendTimeout <= 10*time.Minute, "calls.send_timeout must be within (0, 10m]")
+	check(c.Calls.Wait >= 0 && c.Calls.Wait <= 10*time.Minute, "calls.wait must be within [0, 10m]")
+	check(c.Calls.MaxResponseBytes >= 1024 && c.Calls.MaxResponseBytes <= 1<<20, "calls.max_response_bytes must be within [1 KiB, 1 MiB] (the result column bound)")
+	check(c.Calls.ReconcileInterval > 0 && c.Calls.ReconcileInterval <= time.Minute, "calls.reconcile_interval must be within (0, 1m]")
+	// A sender that admitted a call is given more than its send bound
+	// before the reconciler treats it as gone.
+	check(c.Calls.ReconcileAge > c.Calls.SendTimeout && c.Calls.ReconcileAge <= time.Hour, "calls.reconcile_age must exceed calls.send_timeout and be at most 1h")
+	for i, r := range c.Calls.QualifiedRoutes {
+		u, err := url.Parse(r.Resource)
+		check(err == nil && u.Host != "" && (u.Scheme == "https" || u.Scheme == "http"), "calls.qualified_routes[%d].resource must be an absolute http(s) URL", i)
+		check(r.ProtocolVersion != "", "calls.qualified_routes[%d].protocol_version is required", i)
+		check(r.Transport == "streamable-http", "calls.qualified_routes[%d].transport must be streamable-http (stdio servers are not qualified in this build)", i)
+		check(r.Route == "go-sdk", "calls.qualified_routes[%d].route must be go-sdk (the ContextForge invocation route is not selected)", i)
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
