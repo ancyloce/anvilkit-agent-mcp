@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	mcpv1 "github.com/ancyloce/anvilkit-agent-contracts/go/anvilkit/mcp/v1"
+	"github.com/ancyloce/anvilkit-agent-mcp/internal/adapters/contextforge"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/adapters/postgres"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/application"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/domain"
@@ -43,7 +44,7 @@ type Server struct {
 	ln     net.Listener
 }
 
-func NewServer(listen string, capacity int, tasks Tasks) (*Server, error) {
+func NewServer(listen string, capacity int, tasks Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls) (*Server, error) {
 	validator, err := protovalidate.New()
 	if err != nil {
 		return nil, err
@@ -53,6 +54,13 @@ func NewServer(listen string, capacity int, tasks Tasks) (*Server, error) {
 	h := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(s, h)
 	mcpv1.RegisterBackgroundTaskServiceServer(s, &backgroundServer{tasks: tasks})
+	if catalog != nil && grants != nil {
+		mcpv1.RegisterCatalogServiceServer(s, &catalogServer{catalog: catalog})
+		mcpv1.RegisterGrantServiceServer(s, &grantServer{grants: grants})
+	}
+	if calls != nil {
+		mcpv1.RegisterCallServiceServer(s, &callServer{calls: calls})
+	}
 	h.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	return &Server{grpc: s, health: h, listen: listen}, nil
 }
@@ -147,8 +155,16 @@ func toStatus(err error) error {
 		return status.Error(codes.FailedPrecondition, "EFFECT_UNCERTAIN: "+err.Error())
 	case errors.Is(err, domain.ErrProfileUnknown):
 		return status.Error(codes.FailedPrecondition, "PROFILE_UNQUALIFIED: "+err.Error())
-	case errors.Is(err, application.ErrForbidden):
+	case errors.Is(err, application.ErrForbidden), errors.Is(err, domain.ErrForbidden):
 		return status.Error(codes.PermissionDenied, "FORBIDDEN: "+err.Error())
+	case errors.Is(err, domain.ErrCommandConflict):
+		return status.Error(codes.AlreadyExists, "COMMAND_CONFLICT: "+err.Error())
+	case errors.Is(err, domain.ErrDescriptorMismatch), errors.Is(err, domain.ErrRevisionMismatch), errors.Is(err, domain.ErrInvalidTransition):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, contextforge.ErrUpstream):
+		return status.Error(codes.FailedPrecondition, "UPSTREAM_UNREACHABLE: "+err.Error())
+	case errors.Is(err, contextforge.ErrUnavailable):
+		return status.Error(codes.Unavailable, "DEPENDENCY_UNAVAILABLE")
 	case errors.Is(err, postgres.ErrDuplicateKey):
 		return status.Error(codes.FailedPrecondition, "STALE_EXECUTION: concurrent claim")
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
