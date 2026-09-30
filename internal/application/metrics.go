@@ -27,6 +27,8 @@ type Metrics struct {
 	PoolAcquired     prometheus.Gauge
 	PoolTotal        prometheus.Gauge
 	DispatchQueries  *prometheus.CounterVec
+	GrantTransitions *prometheus.CounterVec
+	CallTransitions  *prometheus.CounterVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -47,8 +49,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		PoolAcquired:     prometheus.NewGauge(prometheus.GaugeOpts{Name: "anvilkit_mcp_db_pool_acquired_connections", Help: "Connections of the active generation's pool currently acquired."}),
 		PoolTotal:        prometheus.NewGauge(prometheus.GaugeOpts{Name: "anvilkit_mcp_db_pool_total_connections", Help: "Connections of the active generation's pool."}),
 		DispatchQueries:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_background_dispatch_queries_total", Help: "Original-dispatch queries for expired external-effect leases by answer."}, []string{"answer"}),
+		GrantTransitions: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_grant_transitions_total", Help: "Grant state transitions by the state reached (pending, active, registration_failed, revoking, revoked)."}, []string{"state"}),
+		CallTransitions:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_tool_call_transitions_total", Help: "Tool call state transitions by the state reached (accepted, admitted, sent, succeeded, failed, denied, unknown, canceled)."}, []string{"state"}),
 	}
-	for _, c := range []prometheus.Collector{m.Requests, m.Claims, m.Submissions, m.LeaseOverruns, m.OverdueRetries, m.OutboxOldest, m.Forwarded, m.ForwardFailures, m.ConfigGeneration, m.ConfigRejections, m.ConfigRotations, m.DrainSeconds, m.ForcedStop, m.PoolAcquired, m.PoolTotal, m.DispatchQueries} {
+	for _, c := range []prometheus.Collector{m.Requests, m.Claims, m.Submissions, m.LeaseOverruns, m.OverdueRetries, m.OutboxOldest, m.Forwarded, m.ForwardFailures, m.ConfigGeneration, m.ConfigRejections, m.ConfigRotations, m.DrainSeconds, m.ForcedStop, m.PoolAcquired, m.PoolTotal, m.DispatchQueries, m.GrantTransitions, m.CallTransitions} {
 		reg.MustRegister(c)
 	}
 	return m
