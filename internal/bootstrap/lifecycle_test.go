@@ -34,6 +34,22 @@ func freePort(t *testing.T) string {
 	return ln.Addr().String()
 }
 
+// isolateEnvironment removes every ambient ANVILKIT_MCP_ override (for
+// example a sourced development environment's database URL, which outranks
+// the mounted secret file) for the test's duration, so the service sees only
+// the inputs the test sets.
+func isolateEnvironment(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(name, "ANVILKIT_MCP_") {
+			continue
+		}
+		require.NoError(t, os.Unsetenv(name))
+		t.Cleanup(func() { _ = os.Setenv(name, value) })
+	}
+}
+
 func metric(t *testing.T, health, name string) string {
 	t.Helper()
 	resp, err := http.Get("http://" + health + "/metrics")
@@ -72,6 +88,7 @@ func TestLifecycleGenerationsAndShutdown(t *testing.T) {
 	cfgFile := filepath.Join(dir, "config.yaml")
 	require.NoError(t, os.WriteFile(cfgFile, []byte("outbox:\n  forwarder_enabled: false\nreload:\n  interval: 200ms\n  drain_limit: 5s\ntasks:\n  sweep_interval: 200ms\n"), 0o600))
 	grpcAddr, healthAddr := freePort(t), freePort(t)
+	isolateEnvironment(t)
 	t.Setenv("ANVILKIT_MCP_CONFIG", cfgFile)
 	t.Setenv("ANVILKIT_MCP_DATABASE_URL_FILE", secret)
 	t.Setenv("ANVILKIT_MCP_LISTEN", grpcAddr)
@@ -145,6 +162,7 @@ func TestStartupFailureUnwinds(t *testing.T) {
 	require.NoError(t, err)
 	defer blocker.Close()
 	healthAddr := freePort(t)
+	isolateEnvironment(t)
 	t.Setenv("ANVILKIT_MCP_CONFIG", cfgFile)
 	t.Setenv("ANVILKIT_MCP_DATABASE_URL", inst.AppDSN)
 	t.Setenv("ANVILKIT_MCP_LISTEN", blocker.Addr().String())
