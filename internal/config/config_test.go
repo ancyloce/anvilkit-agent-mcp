@@ -109,3 +109,21 @@ func TestSecretFileAndApolloSnapshot(t *testing.T) {
 		}
 	}
 }
+
+func TestTelemetryPlacement(t *testing.T) {
+	base := []string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp", "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222"}
+	g, err := LoadFrom(reviewed, append(append([]string{}, base...), "ANVILKIT_MCP_TELEMETRY_OTLP_ENDPOINT=collector:4317"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Config.Telemetry.OTLPEndpoint != "collector:4317" || g.Config.Telemetry.SampleRatio != 1 {
+		t.Fatalf("%+v", g.Config.Telemetry)
+	}
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte("telemetry:\n  sample_ratio: 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFrom(p, base, 1); err == nil || !strings.Contains(err.Error(), "telemetry.sample_ratio") {
+		t.Fatalf("an out-of-range sample ratio is rejected, got %v", err)
+	}
+}

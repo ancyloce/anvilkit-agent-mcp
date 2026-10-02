@@ -168,22 +168,33 @@ type QualifiedRoute struct {
 	Route           string `koanf:"route"`
 }
 
+// Telemetry places the spans (security.md "data classification, logging
+// and deletion"): over OTLP to the collector when an endpoint is placed (no
+// exporter otherwise), sampled at SampleRatio. Read once at process start: a
+// later generation's telemetry values do not change the running exporter.
+type Telemetry struct {
+	OTLPEndpoint string  `koanf:"otlp_endpoint"`
+	SampleRatio  float64 `koanf:"sample_ratio"`
+}
+
 type Config struct {
-	GRPC     GRPC     `koanf:"grpc"`
-	Health   Health   `koanf:"health"`
-	Database Database `koanf:"database"`
-	Tasks    Tasks    `koanf:"tasks"`
-	Outbox   Outbox   `koanf:"outbox"`
-	Control  Control  `koanf:"control"`
-	Apollo   Apollo   `koanf:"apollo"`
-	Reload   Reload   `koanf:"reload"`
-	Catalog  Catalog  `koanf:"catalog"`
-	Barrier  Barrier  `koanf:"barrier"`
-	Calls    Calls    `koanf:"calls"`
+	Telemetry Telemetry `koanf:"telemetry"`
+	GRPC      GRPC      `koanf:"grpc"`
+	Health    Health    `koanf:"health"`
+	Database  Database  `koanf:"database"`
+	Tasks     Tasks     `koanf:"tasks"`
+	Outbox    Outbox    `koanf:"outbox"`
+	Control   Control   `koanf:"control"`
+	Apollo    Apollo    `koanf:"apollo"`
+	Reload    Reload    `koanf:"reload"`
+	Catalog   Catalog   `koanf:"catalog"`
+	Barrier   Barrier   `koanf:"barrier"`
+	Calls     Calls     `koanf:"calls"`
 }
 
 var defaults = map[string]any{
 	"grpc.listen":                  "127.0.0.1:9106",
+	"telemetry.sample_ratio":       1.0,
 	"grpc.capacity":                64,
 	"grpc.shutdown_timeout":        "20s",
 	"health.listen":                "127.0.0.1:9116",
@@ -225,6 +236,7 @@ var defaults = map[string]any{
 var envOverrides = map[string]string{
 	"ANVILKIT_MCP_LISTEN":                    "grpc.listen",
 	"ANVILKIT_MCP_HEALTH_LISTEN":             "health.listen",
+	"ANVILKIT_MCP_TELEMETRY_OTLP_ENDPOINT":   "telemetry.otlp_endpoint",
 	"ANVILKIT_MCP_DATABASE_URL":              "database.url",
 	"ANVILKIT_MCP_DATABASE_URL_FILE":         "database.url_file",
 	"ANVILKIT_MCP_NATS_URL":                  "outbox.nats.url",
@@ -407,6 +419,9 @@ func digestOf(s string) string {
 
 func (c Config) validate() error {
 	var errs []error
+	if c.Telemetry.SampleRatio < 0 || c.Telemetry.SampleRatio > 1 {
+		errs = append(errs, fmt.Errorf("telemetry.sample_ratio %v outside [0, 1]", c.Telemetry.SampleRatio))
+	}
 	check := func(ok bool, format string, args ...any) {
 		if !ok {
 			errs = append(errs, fmt.Errorf(format, args...))
