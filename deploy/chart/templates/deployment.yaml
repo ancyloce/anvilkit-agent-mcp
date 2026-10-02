@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "anvilkit-agent-mcp.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "anvilkit-agent-mcp.selectorLabels" . | nindent 6 }}
@@ -49,6 +51,10 @@ spec:
               value: {{ printf "%s:%d" .Values.listen.address (int .Values.listen.port) | quote }}
             - name: ANVILKIT_MCP_HEALTH_LISTEN
               value: {{ printf "%s:%d" .Values.listen.address (int .Values.health.port) | quote }}
+            {{- if .Values.telemetry.otlpEndpoint }}
+            - name: ANVILKIT_MCP_TELEMETRY_OTLP_ENDPOINT
+              value: {{ .Values.telemetry.otlpEndpoint | quote }}
+            {{- end }}
             # The secret as a mounted file: the kubelet refreshes it when the
             # Secret changes and the generation watcher publishes the new
             # generation (a new pool, probed, then the old one drained).

@@ -17,6 +17,16 @@ image:
 imagePullSecrets: []
 replicaCount: 2
 
+# HorizontalPodAutoscaler (autoscaling/v2). Off unless the environment enables
+# it with an explicit maxReplicas: the maximum is bounded by downstream caps
+# and the database connection budget (deploy/gitops/lock.yaml), never a chart
+# default. While enabled the Deployment leaves replicas to the autoscaler.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 0
+  targetCPUUtilizationPercentage: 70
+
 serviceAccount:
   create: true
   name: ""
@@ -159,3 +169,14 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 topologySpreadConstraints: []
+
+# A voluntary disruption (node drain, rollout) keeps at least one Pod serving.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Telemetry placement (P23): the collector's OTLP endpoint for spans
+# (ANVILKIT_MCP_TELEMETRY_OTLP_ENDPOINT) (the metrics are on the health listener's /metrics); empty disables it.
+# Scraping is the environment's pod annotations.
+telemetry:
+  otlpEndpoint: ""
