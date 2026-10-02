@@ -100,6 +100,7 @@ func Module() fx.Option {
 				return NewHealth(gen.Config.Health.Listen, reg)
 			},
 		),
+		fx.Invoke(startTracing),
 		fx.Invoke(run),
 	)
 }
