@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"buf.build/go/protovalidate"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -50,7 +51,9 @@ func NewServer(listen string, capacity int, tasks Tasks, catalog *application.Ca
 		return nil, err
 	}
 	slots := make(chan struct{}, capacity)
-	s := grpc.NewServer(grpc.ChainUnaryInterceptor(bounded(slots), validateUnary(validator)))
+	// Spans carry the gRPC semantic attributes only (service, method, status
+	// code; no messages or metadata) and continue the callers' traces.
+	s := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()), grpc.ChainUnaryInterceptor(bounded(slots), validateUnary(validator)))
 	h := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(s, h)
 	mcpv1.RegisterBackgroundTaskServiceServer(s, &backgroundServer{tasks: tasks})
