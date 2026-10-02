@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -34,7 +35,7 @@ type DispatchQuery struct {
 // Dial connects to Control (plaintext, DEVELOPMENT_ONLY; workload mTLS is
 // ENV-03) without blocking; failures surface per query.
 func Dial(address string, timeout time.Duration) (*DispatchQuery, error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(address, grpc.WithStatsHandler(otelgrpc.NewClientHandler()), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("control %s: %w", address, err)
 	}
