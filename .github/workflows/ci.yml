@@ -60,8 +60,8 @@ jobs:
         with:
           version: "v3.19.0"
       - run: >-
-          helm lint deploy/chart --set database.secret.name=mcp-database --set nats.url=nats://nats:4222
+          helm lint deploy/chart --set database.secret.name=mcp-database --set nats.url=tls://nats:4222 --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer --set nats.tls.caSecret.name=nats-ca
           --set relay.database.secret.name=mcp-relay-database --set relay.queue.secret.name=queue-valkey
       - run: >-
-          helm template anvilkit-agent-mcp deploy/chart --set database.secret.name=mcp-database --set nats.url=nats://nats:4222
+          helm template anvilkit-agent-mcp deploy/chart --set database.secret.name=mcp-database --set nats.url=tls://nats:4222 --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer --set nats.tls.caSecret.name=nats-ca
           --set relay.database.secret.name=mcp-relay-database --set relay.queue.secret.name=queue-valkey > /dev/null
