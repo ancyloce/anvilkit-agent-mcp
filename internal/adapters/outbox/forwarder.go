@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"time"
@@ -28,6 +29,9 @@ type ForwarderConfig struct {
 	NATSName       string
 	PublishTimeout time.Duration
 	CloseTimeout   time.Duration
+	// NATSTLS is the verified transport (nil under the DEVELOPMENT_ONLY
+	// plaintext foundation, admitted by the configuration guard only).
+	NATSTLS *tls.Config
 }
 
 // Forwarder is the watermill forwarder (C07): the watermill-sql subscriber
@@ -49,7 +53,11 @@ type Forwarder struct {
 // NewForwarder builds the pieces and probes the NATS connection; nothing
 // runs until Run.
 func NewForwarder(pool *pgxpool.Pool, cfg ForwarderConfig, log *slog.Logger, forwarded, failures prometheus.Counter) (*Forwarder, error) {
-	nc, err := nats.Connect(cfg.NATSURL, nats.Name(cfg.NATSName), nats.Timeout(cfg.PublishTimeout), nats.MaxReconnects(-1), nats.RetryOnFailedConnect(false))
+	opts := []nats.Option{nats.Name(cfg.NATSName), nats.Timeout(cfg.PublishTimeout), nats.MaxReconnects(-1), nats.RetryOnFailedConnect(false)}
+	if cfg.NATSTLS != nil {
+		opts = append(opts, nats.Secure(cfg.NATSTLS))
+	}
+	nc, err := nats.Connect(cfg.NATSURL, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("nats connect: %w", err)
 	}

@@ -9,7 +9,6 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -30,8 +29,8 @@ type PolicyClient struct {
 	timeout time.Duration
 }
 
-func DialPolicy(address string, timeout time.Duration) (*PolicyClient, error) {
-	conn, err := grpc.NewClient(address, grpc.WithStatsHandler(otelgrpc.NewClientHandler()), grpc.WithTransportCredentials(insecure.NewCredentials()))
+func DialPolicy(address string, timeout time.Duration, transport grpc.DialOption) (*PolicyClient, error) {
+	conn, err := grpc.NewClient(address, grpc.WithStatsHandler(otelgrpc.NewClientHandler()), transport)
 	if err != nil {
 		return nil, fmt.Errorf("control %s: %w", address, err)
 	}
