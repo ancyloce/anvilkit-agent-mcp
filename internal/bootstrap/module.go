@@ -93,8 +93,14 @@ func Module() fx.Option {
 					SendTimeout: c.SendTimeout, Wait: c.Wait, ReconcileAge: c.ReconcileAge, ReconcileBatch: 50,
 				}, clock, metrics, log)
 			},
-			func(gen config.Generation, tasks *application.Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls) (*grpctransport.Server, error) {
-				return grpctransport.NewServer(gen.Config.GRPC.Listen, gen.Config.GRPC.Capacity, tasks, catalog, grants, calls)
+			func(gen config.Generation, log *slog.Logger) (*workloadIdentity, error) {
+				return newWorkloadIdentity(gen.Config, log)
+			},
+			func(lc fx.Lifecycle, gen config.Generation, w *workloadIdentity, tasks *application.Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls) (*grpctransport.Server, error) {
+				if w.reloader != nil {
+					lc.Append(fx.Hook{OnStart: func(context.Context) error { w.reloader.Start(); return nil }, OnStop: func(context.Context) error { w.reloader.Stop(); return nil }})
+				}
+				return grpctransport.NewServerWithIdentity(gen.Config.GRPC.Listen, w.server(gen.Config), gen.Config.GRPC.Capacity, tasks, catalog, grants, calls)
 			},
 			func(gen config.Generation, reg *prometheus.Registry) *Health {
 				return NewHealth(gen.Config.Health.Listen, reg)
@@ -105,12 +111,16 @@ func Module() fx.Option {
 	)
 }
 
-func newDispatchQuery(lc fx.Lifecycle, gen config.Generation, log *slog.Logger) (application.DispatchQuery, error) {
+func newDispatchQuery(lc fx.Lifecycle, gen config.Generation, w *workloadIdentity, log *slog.Logger) (application.DispatchQuery, error) {
 	if gen.Config.Control.Address == "" {
 		log.Warn("no Control placement: expired external-effect leases are never reassigned (control.address unset)")
 		return application.NoDispatchQuery{}, nil
 	}
-	q, err := control.Dial(gen.Config.Control.Address, gen.Config.Control.Timeout)
+	transport, err := w.controlTransport(gen.Config, log)
+	if err != nil {
+		return nil, err
+	}
+	q, err := control.Dial(gen.Config.Control.Address, gen.Config.Control.Timeout, transport)
 	if err != nil {
 		return nil, err
 	}
@@ -148,12 +158,16 @@ func (noRegistry) Revocation(context.Context, string, uint64) (application.Barri
 	return application.Barrier{}, errNoControl
 }
 
-func newPolicyRegistry(lc fx.Lifecycle, gen config.Generation, log *slog.Logger) (application.PolicyRegistry, error) {
+func newPolicyRegistry(lc fx.Lifecycle, gen config.Generation, w *workloadIdentity, log *slog.Logger) (application.PolicyRegistry, error) {
 	if gen.Config.Control.Address == "" {
 		log.Warn("no Control placement: grants stay pending and revocations stay revoking (control.address unset)")
 		return noRegistry{}, nil
 	}
-	p, err := control.DialPolicy(gen.Config.Control.Address, gen.Config.Control.Timeout)
+	transport, err := w.controlTransport(gen.Config, log)
+	if err != nil {
+		return nil, err
+	}
+	p, err := control.DialPolicy(gen.Config.Control.Address, gen.Config.Control.Timeout, transport)
 	if err != nil {
 		return nil, err
 	}
@@ -237,12 +251,16 @@ func (noToolDispatch) GetTool(context.Context, string) (application.DispatchView
 	return application.DispatchView{}, errNoControl
 }
 
-func newToolDispatcher(lc fx.Lifecycle, gen config.Generation, log *slog.Logger) (application.ToolDispatcher, error) {
+func newToolDispatcher(lc fx.Lifecycle, gen config.Generation, w *workloadIdentity, log *slog.Logger) (application.ToolDispatcher, error) {
 	if gen.Config.Control.Address == "" {
 		log.Warn("no Control placement: tool calls are never admitted (control.address unset)")
 		return noToolDispatch{}, nil
 	}
-	d, err := control.Dial(gen.Config.Control.Address, gen.Config.Control.Timeout)
+	transport, err := w.controlTransport(gen.Config, log)
+	if err != nil {
+		return nil, err
+	}
+	d, err := control.Dial(gen.Config.Control.Address, gen.Config.Control.Timeout, transport)
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -89,9 +90,18 @@ func buildRuntime(ctx context.Context, gen config.Generation, metrics *applicati
 	rt = &runtime{gen: gen, pool: pool}
 	if cfg.Outbox.ForwarderEnabled {
 		o := cfg.Outbox
+		var natsTLS *tls.Config
+		if o.NATS.TLS.Mode == "development" {
+			if !cfg.Development.Enabled {
+				return nil, errors.New("outbox.nats.tls: development mode without development.enabled")
+			}
+			log.Warn("DEVELOPMENT_ONLY plaintext transport", "connection", "nats")
+		} else if natsTLS, err = clientTLSConfig("outbox.nats.tls", o.NATS.TLS, log); err != nil {
+			return nil, err
+		}
 		rt.forwarder, err = outbox.NewForwarder(pool, outbox.ForwarderConfig{
 			ConsumerGroup: o.ConsumerGroup, PollInterval: o.PollInterval, AckDeadline: o.AckDeadline, ResendInterval: o.ResendInterval, BatchSize: o.BatchSize,
-			NATSURL: o.NATS.URL, NATSName: o.NATS.Name, PublishTimeout: o.NATS.PublishTimeout, CloseTimeout: cfg.Reload.DrainLimit,
+			NATSURL: o.NATS.URL, NATSName: o.NATS.Name, PublishTimeout: o.NATS.PublishTimeout, CloseTimeout: cfg.Reload.DrainLimit, NATSTLS: natsTLS,
 		}, log, metrics.Forwarded, metrics.ForwardFailures)
 		if err != nil {
 			return nil, fmt.Errorf("forwarder: %w", err)

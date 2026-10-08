@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -17,7 +18,7 @@ import (
 
 // startTracing installs the process's tracer provider from the first
 // generation: spans go over OTLP/gRPC to the placed collector (plaintext,
-// DEVELOPMENT_ONLY until ENV-03's workload PKI) or nowhere. The gRPC server
+// under telemetry.otlp_tls, plaintext only with the development guard) or nowhere. The gRPC server
 // and Control client stats handlers use it through the global provider; the
 // stop hook flushes within the stop deadline.
 func startTracing(lc fx.Lifecycle, gen config.Generation) error {
@@ -25,7 +26,11 @@ func startTracing(lc fx.Lifecycle, gen config.Generation) error {
 	if gen.Config.Telemetry.OTLPEndpoint == "" {
 		return nil
 	}
-	exporter, err := otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(gen.Config.Telemetry.OTLPEndpoint), otlptracegrpc.WithInsecure())
+	transport, err := clientTransport("telemetry.otlp_tls", gen.Config.Telemetry.OTLPTLS, gen.Config.Development.Enabled, slog.Default())
+	if err != nil {
+		return err
+	}
+	exporter, err := otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(gen.Config.Telemetry.OTLPEndpoint), otlptracegrpc.WithDialOption(transport))
 	if err != nil {
 		return err
 	}

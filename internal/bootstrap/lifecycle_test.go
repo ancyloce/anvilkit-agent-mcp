@@ -17,13 +17,14 @@ import (
 	"go.uber.org/fx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
 	mcpv1 "github.com/ancyloce/anvilkit-agent-contracts/go/anvilkit/mcp/v1"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/bootstrap"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/testdb"
+	"github.com/ancyloce/anvilkit-agent-mcp/internal/transport/identity"
+	"github.com/ancyloce/anvilkit-agent-mcp/internal/transport/identity/identitytest"
 )
 
 func freePort(t *testing.T) string {
@@ -32,6 +33,33 @@ func freePort(t *testing.T) string {
 	require.NoError(t, err)
 	defer ln.Close()
 	return ln.Addr().String()
+}
+
+// pki mints a throwaway CA, mounts the MCP identity and the caller's
+// identity (a workload of the given ServiceAccount) and places the server's
+// files in the environment, so the bootstrap test runs the real mTLS path.
+func pki(t *testing.T, dir string, callerSA string) (dial func() *grpc.ClientConn) {
+	t.Helper()
+	ca := identitytest.NewCA(t, "test-ca")
+	srvDir := filepath.Join(dir, "identity")
+	identitytest.Mount(t, srvDir, ca.Issue(t, "anvilkit-agent-mcp", []string{identitytest.SPIFFE("anvilkit.local", "anvilkit-apps", "anvilkit-agent-mcp")}, "anvilkit-agent-mcp"), ca.PEM)
+	cert, key, caFile := identitytest.Files(srvDir)
+	t.Setenv("ANVILKIT_MCP_IDENTITY_CERT_FILE", cert)
+	t.Setenv("ANVILKIT_MCP_IDENTITY_KEY_FILE", key)
+	t.Setenv("ANVILKIT_MCP_IDENTITY_CA_FILE", caFile)
+	t.Setenv("ANVILKIT_MCP_IDENTITY_TRUST_DOMAIN", "anvilkit.local")
+	cliDir := filepath.Join(dir, "caller-"+callerSA)
+	identitytest.Mount(t, cliDir, ca.Issue(t, callerSA, []string{identitytest.SPIFFE("anvilkit.local", "anvilkit-apps", callerSA)}), ca.PEM)
+	return func() *grpc.ClientConn {
+		c, k, ca := identitytest.Files(cliDir)
+		r, err := identity.New(identity.Files{CertFile: c, KeyFile: k, CAFile: ca}, 0, nil)
+		require.NoError(t, err)
+		creds, err := identity.NewClientCredentials(r, "anvilkit-agent-mcp")
+		require.NoError(t, err)
+		conn, err := grpc.NewClient(os.Getenv("ANVILKIT_MCP_LISTEN"), grpc.WithTransportCredentials(creds))
+		require.NoError(t, err)
+		return conn
+	}
 }
 
 // isolateEnvironment removes every ambient ANVILKIT_MCP_ override (for
@@ -93,6 +121,7 @@ func TestLifecycleGenerationsAndShutdown(t *testing.T) {
 	t.Setenv("ANVILKIT_MCP_DATABASE_URL_FILE", secret)
 	t.Setenv("ANVILKIT_MCP_LISTEN", grpcAddr)
 	t.Setenv("ANVILKIT_MCP_HEALTH_LISTEN", healthAddr)
+	dial := pki(t, dir, "anvilkit-agent-background-worker")
 
 	app := fx.New(bootstrap.Module(), fx.NopLogger)
 	require.NoError(t, app.Err())
@@ -100,8 +129,7 @@ func TestLifecycleGenerationsAndShutdown(t *testing.T) {
 	require.Equal(t, http.StatusOK, readyStatus(healthAddr))
 	require.Equal(t, "1", metric(t, healthAddr, "anvilkit_mcp_config_generation"))
 
-	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
+	conn := dial()
 	defer conn.Close()
 	hc := grpc_health_v1.NewHealthClient(conn)
 	hr, err := hc.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
@@ -167,6 +195,7 @@ func TestStartupFailureUnwinds(t *testing.T) {
 	t.Setenv("ANVILKIT_MCP_DATABASE_URL", inst.AppDSN)
 	t.Setenv("ANVILKIT_MCP_LISTEN", blocker.Addr().String())
 	t.Setenv("ANVILKIT_MCP_HEALTH_LISTEN", healthAddr)
+	pki(t, dir, "anvilkit-agent-background-worker")
 	app := fx.New(bootstrap.Module(), fx.NopLogger)
 	require.NoError(t, app.Err())
 	err = app.Start(context.Background())
@@ -194,6 +223,7 @@ func TestActiveSnapshotExpiryAndRenewal(t *testing.T) {
 	t.Setenv("ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE", snapshot)
 	t.Setenv("ANVILKIT_MCP_LISTEN", grpcAddr)
 	t.Setenv("ANVILKIT_MCP_HEALTH_LISTEN", healthAddr)
+	dial := pki(t, dir, "anvilkit-agent-background-worker")
 	app := fx.New(bootstrap.Module(), fx.NopLogger)
 	require.NoError(t, app.Start(context.Background()))
 	t.Cleanup(func() { require.NoError(t, app.Stop(context.Background())) })
@@ -201,10 +231,9 @@ func TestActiveSnapshotExpiryAndRenewal(t *testing.T) {
 	require.Eventually(t, func() bool { return metric(t, healthAddr, "anvilkit_mcp_config_rejections_total") != "0" }, 2*time.Second, 50*time.Millisecond)
 	require.Equal(t, 200, readyStatus(healthAddr))
 	require.Eventually(t, func() bool { return readyStatus(healthAddr) == 503 }, 6*time.Second, 50*time.Millisecond)
-	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
+	conn := dial()
 	defer conn.Close()
-	_, err = mcpv1.NewBackgroundTaskServiceClient(conn).ClaimTask(context.Background(), &mcpv1.ClaimTaskRequest{TaskId: "expired", Generation: "1", WorkerId: "worker", LeaseSeconds: 10})
+	_, err := mcpv1.NewBackgroundTaskServiceClient(conn).ClaimTask(context.Background(), &mcpv1.ClaimTaskRequest{TaskId: "expired", Generation: "1", WorkerId: "worker", LeaseSeconds: 10})
 	require.Equal(t, codes.FailedPrecondition, status.Code(err))
 	require.NoError(t, os.WriteFile(snapshot, document(time.Now().Add(time.Minute)), 0600))
 	require.Eventually(t, func() bool { return readyStatus(healthAddr) == 200 }, 5*time.Second, 50*time.Millisecond)
