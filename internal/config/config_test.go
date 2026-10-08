@@ -10,8 +10,16 @@ import (
 
 const reviewed = "../../config.yaml"
 
+// identityEnv places the mounted identity files (P0.1); the loader does
+// not read them.
+var identityEnv = []string{
+	"ANVILKIT_MCP_IDENTITY_CERT_FILE=/etc/anvilkit/identity/tls.crt",
+	"ANVILKIT_MCP_IDENTITY_KEY_FILE=/etc/anvilkit/identity/tls.key",
+	"ANVILKIT_MCP_IDENTITY_CA_FILE=/etc/anvilkit/identity/ca.crt",
+}
+
 func TestLoadReviewedFile(t *testing.T) {
-	g, err := LoadFrom(reviewed, []string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp", "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222"}, 1)
+	g, err := LoadFrom(reviewed, append([]string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp", "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222"}, identityEnv...), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +40,7 @@ func TestRejections(t *testing.T) {
 		}
 		return p
 	}
-	base := []string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp", "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222"}
+	base := append([]string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp", "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222"}, identityEnv...)
 	cases := []struct {
 		name string
 		file string
@@ -40,6 +48,15 @@ func TestRejections(t *testing.T) {
 		want string
 	}{
 		{"unknown key", "grpc:\n  listen: 127.0.0.1:1\n  bogus: 1\n", base, "bogus"},
+		{"mtls listener needs files", "development:\n  enabled: true\n", base[:2], "grpc.identity.cert_file, key_file and ca_file are required"},
+		{"trust domain outside development", "{}\n", append([]string{}, base...), "grpc.identity.trust_domain is required outside development"},
+		{"development listener needs the guard", "grpc:\n  identity:\n    mode: development\n    trust_domain: anvilkit.local\n", base, "grpc.identity.mode development (plaintext, no caller identity) requires development.enabled"},
+		{"nats development needs the guard", "grpc:\n  identity:\n    trust_domain: anvilkit.local\noutbox:\n  nats:\n    tls:\n      mode: development\n", base, "outbox.nats.tls.mode development (plaintext) requires development.enabled"},
+		{"nats tls needs the bundle", "grpc:\n  identity:\n    trust_domain: anvilkit.local\n", base, "outbox.nats.tls.ca_file is required"},
+		{"control development needs the guard", "grpc:\n  identity:\n    trust_domain: anvilkit.local\noutbox:\n  nats:\n    tls:\n      ca_file: /ca\ncontrol:\n  identity:\n    mode: development\n", append(append([]string{}, base...), "ANVILKIT_MCP_CONTROL_ADDRESS=127.0.0.1:9101"), "control.identity.mode development (plaintext) requires development.enabled"},
+		{"bad trust domain", "development:\n  enabled: true\ngrpc:\n  identity:\n    trust_domain: Not_Valid\n", base, "grpc.identity.trust_domain"},
+		{"guard is file-only", "development:\n  enabled: true\n", append(append([]string{}, base...), "ANVILKIT_MCP_DEVELOPMENT_ENABLED=true"), "not allowed overrides"},
+		{"health is not the business listener", "development:\n  enabled: true\nhealth:\n  listen: 127.0.0.1:9106\n", base, "health.listen must not be grpc.listen"},
 		{"secret in file", "database:\n  url: postgres://x\n", base, "secret"},
 		{"placement in file", "outbox:\n  nats:\n    url: nats://x\n", base, "placement"},
 		{"unknown env", "{}\n", append(append([]string{}, base...), "ANVILKIT_MCP_SURPRISE=1"), "not allowed overrides"},
@@ -70,10 +87,10 @@ func TestSecretFileAndApolloSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(file, []byte("apollo:\n  mode: snapshot\n"), 0o600); err != nil {
+	if err := os.WriteFile(file, []byte("apollo:\n  mode: snapshot\noutbox:\n  nats:\n    tls:\n      ca_file: /etc/anvilkit/nats-ca/ca.crt\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"ANVILKIT_MCP_DATABASE_URL_FILE=" + secret, "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222", "ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE=" + snapshot}
+	env := append([]string{"ANVILKIT_MCP_DATABASE_URL_FILE=" + secret, "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222", "ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE=" + snapshot, "ANVILKIT_MCP_IDENTITY_TRUST_DOMAIN=anvilkit.local"}, identityEnv...)
 	g1, err := LoadFrom(file, env, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +128,7 @@ func TestSecretFileAndApolloSnapshot(t *testing.T) {
 }
 
 func TestTelemetryPlacement(t *testing.T) {
-	base := []string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp", "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222"}
+	base := append([]string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp", "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222"}, identityEnv...)
 	g, err := LoadFrom(reviewed, append(append([]string{}, base...), "ANVILKIT_MCP_TELEMETRY_OTLP_ENDPOINT=collector:4317"), 1)
 	if err != nil {
 		t.Fatal(err)
@@ -125,5 +142,35 @@ func TestTelemetryPlacement(t *testing.T) {
 	}
 	if _, err := LoadFrom(p, base, 1); err == nil || !strings.Contains(err.Error(), "telemetry.sample_ratio") {
 		t.Fatalf("an out-of-range sample ratio is rejected, got %v", err)
+	}
+}
+
+// TestIdentityDefaultsAndGuard (P0.1): the reviewed file keeps the listener
+// and the Control clients on mTLS while the guard admits only the named
+// plaintext development transports; the development trust domain applies
+// only under the guard; the Control client inherits the listener's files.
+func TestIdentityDefaultsAndGuard(t *testing.T) {
+	base := append([]string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp", "ANVILKIT_MCP_NATS_URL=nats://127.0.0.1:4222"}, identityEnv...)
+	g, err := LoadFrom(reviewed, base, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := g.Config
+	if c.GRPC.Identity.Mode != "mtls" || c.Control.Identity.Mode != "mtls" || !c.Development.Enabled || c.Outbox.NATS.TLS.Mode != "development" || c.TrustDomain() != "anvilkit.local" {
+		t.Fatalf("%+v", c)
+	}
+	if m := c.ControlMTLS(); m.CertFile != "/etc/anvilkit/identity/tls.crt" || m.ServerName != "anvilkit-agent-control" {
+		t.Fatalf("control inherits the listener's files: %+v", m)
+	}
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte("grpc:\n  identity:\n    trust_domain: prod.example\noutbox:\n  nats:\n    tls:\n      ca_file: /etc/anvilkit/nats-ca/ca.crt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g, err = LoadFrom(p, base, 1)
+	if err != nil {
+		t.Fatalf("production shape without the guard: %v", err)
+	}
+	if g.Config.Development.Enabled || g.Config.TrustDomain() != "prod.example" {
+		t.Fatalf("%+v", g.Config)
 	}
 }

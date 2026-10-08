@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -41,6 +42,57 @@ type GRPC struct {
 	Listen          string        `koanf:"listen"`
 	Capacity        int           `koanf:"capacity"`
 	ShutdownTimeout time.Duration `koanf:"shutdown_timeout"`
+	// Identity is the listener's workload identity (P0.1): mtls serves TLS
+	// 1.3 with required, verified client certificates and authorizes every
+	// RPC by the peer's SPIFFE URI SAN; development is plaintext and
+	// authorizes nothing, admitted only with development.enabled.
+	Identity ServerIdentity `koanf:"identity"`
+}
+
+// ServerIdentity names the mounted identity material and the trust domain
+// peers must belong to. The files are placements that are accepted from the
+// file or the environment (ANVILKIT_MCP_IDENTITY_{CERT,KEY,CA}_FILE); they
+// are watched and reloaded as a whole.
+type ServerIdentity struct {
+	Mode        string `koanf:"mode"`
+	TrustDomain string `koanf:"trust_domain"`
+	CertFile    string `koanf:"cert_file"`
+	KeyFile     string `koanf:"key_file"`
+	CAFile      string `koanf:"ca_file"`
+	// MaxConnectionAge bounds every accepted connection so that no
+	// connection outlives a trust change by more than this.
+	MaxConnectionAge time.Duration `koanf:"max_connection_age"`
+	// ReloadInterval is the polling interval of the identity files.
+	ReloadInterval time.Duration `koanf:"reload_interval"`
+}
+
+// ClientTLS is the transport of an outbound connection whose server is not
+// authorized by workload identity here (NATS, the OTLP collector):
+// development is plaintext (admitted only with development.enabled), tls
+// verifies the server against ca_file and server_name, mtls additionally
+// presents cert_file/key_file.
+type ClientTLS struct {
+	Mode       string `koanf:"mode"`
+	CAFile     string `koanf:"ca_file"`
+	CertFile   string `koanf:"cert_file"`
+	KeyFile    string `koanf:"key_file"`
+	ServerName string `koanf:"server_name"`
+}
+
+// ClientIdentity is the identity presented to Control: mtls presents the
+// workload certificate (mtls files; empty ones default to grpc.identity's)
+// and verifies Control by server_name; development is plaintext (needs
+// development.enabled).
+type ClientIdentity struct {
+	Mode string    `koanf:"mode"`
+	MTLS ClientTLS `koanf:"mtls"`
+}
+
+// Development is the top-level DEVELOPMENT_ONLY guard: every plaintext
+// business connection of this process requires both its own development
+// mode and Enabled; Enabled alone downgrades nothing. File-only.
+type Development struct {
+	Enabled bool `koanf:"enabled"`
 }
 
 // Health is the plaintext probe and metrics listener.
@@ -84,14 +136,16 @@ type NATS struct {
 	URL            string        `koanf:"url"`
 	PublishTimeout time.Duration `koanf:"publish_timeout"`
 	Name           string        `koanf:"name"`
+	TLS            ClientTLS     `koanf:"tls"`
 }
 
 // Control is the placement of the original-dispatch query for
 // external-effect leases (DD-09 §1); without an address the owner has no
 // evidence and never reassigns such a lease.
 type Control struct {
-	Address string        `koanf:"address"`
-	Timeout time.Duration `koanf:"timeout"`
+	Address  string         `koanf:"address"`
+	Timeout  time.Duration  `koanf:"timeout"`
+	Identity ClientIdentity `koanf:"identity"`
 }
 
 // Apollo is the non-secret central configuration (A10): this build
@@ -175,59 +229,70 @@ type QualifiedRoute struct {
 type Telemetry struct {
 	OTLPEndpoint string  `koanf:"otlp_endpoint"`
 	SampleRatio  float64 `koanf:"sample_ratio"`
+	// OTLPTLS is validated only while an endpoint is placed.
+	OTLPTLS ClientTLS `koanf:"otlp_tls"`
 }
 
 type Config struct {
-	Telemetry Telemetry `koanf:"telemetry"`
-	GRPC      GRPC      `koanf:"grpc"`
-	Health    Health    `koanf:"health"`
-	Database  Database  `koanf:"database"`
-	Tasks     Tasks     `koanf:"tasks"`
-	Outbox    Outbox    `koanf:"outbox"`
-	Control   Control   `koanf:"control"`
-	Apollo    Apollo    `koanf:"apollo"`
-	Reload    Reload    `koanf:"reload"`
-	Catalog   Catalog   `koanf:"catalog"`
-	Barrier   Barrier   `koanf:"barrier"`
-	Calls     Calls     `koanf:"calls"`
+	Development Development `koanf:"development"`
+	Telemetry   Telemetry   `koanf:"telemetry"`
+	GRPC        GRPC        `koanf:"grpc"`
+	Health      Health      `koanf:"health"`
+	Database    Database    `koanf:"database"`
+	Tasks       Tasks       `koanf:"tasks"`
+	Outbox      Outbox      `koanf:"outbox"`
+	Control     Control     `koanf:"control"`
+	Apollo      Apollo      `koanf:"apollo"`
+	Reload      Reload      `koanf:"reload"`
+	Catalog     Catalog     `koanf:"catalog"`
+	Barrier     Barrier     `koanf:"barrier"`
+	Calls       Calls       `koanf:"calls"`
 }
 
 var defaults = map[string]any{
-	"grpc.listen":                  "127.0.0.1:9106",
-	"telemetry.sample_ratio":       1.0,
-	"grpc.capacity":                64,
-	"grpc.shutdown_timeout":        "20s",
-	"health.listen":                "127.0.0.1:9116",
-	"database.max_conn":            8,
-	"tasks.max_input_bytes":        65536,
-	"tasks.max_lease":              "10m",
-	"tasks.retry_delay":            "5s",
-	"tasks.max_attempts":           3,
-	"tasks.sweep_interval":         "2s",
-	"outbox.forwarder_enabled":     true,
-	"outbox.consumer_group":        "anvilkit-agent-mcp-forwarder",
-	"outbox.poll_interval":         "500ms",
-	"outbox.ack_deadline":          "30s",
-	"outbox.resend_interval":       "1s",
-	"outbox.batch_size":            100,
-	"outbox.nats.publish_timeout":  "5s",
-	"outbox.nats.name":             "anvilkit-agent-mcp",
-	"control.timeout":              "5s",
-	"apollo.mode":                  ApolloDisabled,
-	"apollo.app_id":                "anvilkit-agent-mcp",
-	"reload.interval":              "2s",
-	"reload.drain_limit":           "30s",
-	"catalog.contextforge.timeout": "60s",
-	"catalog.allowed_hosts":        []string{},
-	"catalog.private_hosts":        []string{},
-	"barrier.reconcile_interval":   "2s",
-	"barrier.reconcile_age":        "5s",
-	"calls.qualified_routes":       []map[string]any{},
-	"calls.send_timeout":           "60s",
-	"calls.wait":                   "30s",
-	"calls.max_response_bytes":     1048576,
-	"calls.reconcile_interval":     "2s",
-	"calls.reconcile_age":          "2m",
+	"grpc.listen":                       "127.0.0.1:9106",
+	"telemetry.sample_ratio":            1.0,
+	"grpc.capacity":                     64,
+	"grpc.shutdown_timeout":             "20s",
+	"grpc.identity.mode":                "mtls",
+	"grpc.identity.max_connection_age":  "1h",
+	"grpc.identity.reload_interval":     "5s",
+	"development.enabled":               false,
+	"control.identity.mode":             "mtls",
+	"control.identity.mtls.server_name": "anvilkit-agent-control",
+	"outbox.nats.tls.mode":              "tls",
+	"telemetry.otlp_tls.mode":           "tls",
+	"health.listen":                     "127.0.0.1:9116",
+	"database.max_conn":                 8,
+	"tasks.max_input_bytes":             65536,
+	"tasks.max_lease":                   "10m",
+	"tasks.retry_delay":                 "5s",
+	"tasks.max_attempts":                3,
+	"tasks.sweep_interval":              "2s",
+	"outbox.forwarder_enabled":          true,
+	"outbox.consumer_group":             "anvilkit-agent-mcp-forwarder",
+	"outbox.poll_interval":              "500ms",
+	"outbox.ack_deadline":               "30s",
+	"outbox.resend_interval":            "1s",
+	"outbox.batch_size":                 100,
+	"outbox.nats.publish_timeout":       "5s",
+	"outbox.nats.name":                  "anvilkit-agent-mcp",
+	"control.timeout":                   "5s",
+	"apollo.mode":                       ApolloDisabled,
+	"apollo.app_id":                     "anvilkit-agent-mcp",
+	"reload.interval":                   "2s",
+	"reload.drain_limit":                "30s",
+	"catalog.contextforge.timeout":      "60s",
+	"catalog.allowed_hosts":             []string{},
+	"catalog.private_hosts":             []string{},
+	"barrier.reconcile_interval":        "2s",
+	"barrier.reconcile_age":             "5s",
+	"calls.qualified_routes":            []map[string]any{},
+	"calls.send_timeout":                "60s",
+	"calls.wait":                        "30s",
+	"calls.max_response_bytes":          1048576,
+	"calls.reconcile_interval":          "2s",
+	"calls.reconcile_age":               "2m",
 }
 
 // envOverrides is the complete set of accepted environment variables:
@@ -236,6 +301,10 @@ var defaults = map[string]any{
 var envOverrides = map[string]string{
 	"ANVILKIT_MCP_LISTEN":                    "grpc.listen",
 	"ANVILKIT_MCP_HEALTH_LISTEN":             "health.listen",
+	"ANVILKIT_MCP_IDENTITY_CERT_FILE":        "grpc.identity.cert_file",
+	"ANVILKIT_MCP_IDENTITY_KEY_FILE":         "grpc.identity.key_file",
+	"ANVILKIT_MCP_IDENTITY_CA_FILE":          "grpc.identity.ca_file",
+	"ANVILKIT_MCP_IDENTITY_TRUST_DOMAIN":     "grpc.identity.trust_domain",
 	"ANVILKIT_MCP_TELEMETRY_OTLP_ENDPOINT":   "telemetry.otlp_endpoint",
 	"ANVILKIT_MCP_DATABASE_URL":              "database.url",
 	"ANVILKIT_MCP_DATABASE_URL_FILE":         "database.url_file",
@@ -431,6 +500,8 @@ func (c Config) validate() error {
 	check(c.GRPC.Capacity > 0 && c.GRPC.Capacity <= 4096, "grpc.capacity must be within [1, 4096]")
 	check(c.GRPC.ShutdownTimeout > 0 && c.GRPC.ShutdownTimeout <= 5*time.Minute, "grpc.shutdown_timeout must be within (0, 5m]")
 	check(c.Health.Listen != "", "health.listen is required")
+	check(c.Health.Listen != c.GRPC.Listen, "health.listen must not be grpc.listen: the probe listener never carries business traffic")
+	errs = append(errs, c.validateIdentity()...)
 	check(c.Database.URL != "", "database.url is required (ANVILKIT_MCP_DATABASE_URL or ANVILKIT_MCP_DATABASE_URL_FILE)")
 	if c.Database.URL != "" {
 		u, err := url.Parse(c.Database.URL)
@@ -486,4 +557,104 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: %w", errors.Join(errs...))
 	}
 	return nil
+}
+
+// validateIdentity checks the listener identity, the top-level guard, the
+// Control client identity and the outbound TLS modes (P0.1).
+func (c Config) validateIdentity() []error {
+	var errs []error
+	id := c.GRPC.Identity
+	switch id.Mode {
+	case "mtls":
+		if id.CertFile == "" || id.KeyFile == "" || id.CAFile == "" {
+			errs = append(errs, errors.New("grpc.identity.cert_file, key_file and ca_file are required under grpc.identity.mode mtls (ANVILKIT_MCP_IDENTITY_{CERT,KEY,CA}_FILE)"))
+		}
+	case "development":
+		if !c.Development.Enabled {
+			errs = append(errs, errors.New("grpc.identity.mode development (plaintext, no caller identity) requires development.enabled: true (DEVELOPMENT_ONLY)"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("grpc.identity.mode %q is not one of mtls, development", id.Mode))
+	}
+	switch {
+	case id.TrustDomain == "" && c.Development.Enabled:
+	case id.TrustDomain == "":
+		errs = append(errs, errors.New("grpc.identity.trust_domain is required outside development (the development default anvilkit.local applies only with development.enabled: true)"))
+	case !trustDomainPattern.MatchString(id.TrustDomain):
+		errs = append(errs, fmt.Errorf("grpc.identity.trust_domain %q is not a lowercase DNS name", id.TrustDomain))
+	}
+	if id.MaxConnectionAge < time.Minute || id.MaxConnectionAge > 24*time.Hour {
+		errs = append(errs, fmt.Errorf("grpc.identity.max_connection_age %s outside [1m, 24h]", id.MaxConnectionAge))
+	}
+	if id.ReloadInterval < 100*time.Millisecond || id.ReloadInterval > time.Hour {
+		errs = append(errs, fmt.Errorf("grpc.identity.reload_interval %s outside [100ms, 1h]", id.ReloadInterval))
+	}
+	switch c.Control.Identity.Mode {
+	case "mtls":
+		m := c.ControlMTLS()
+		if c.Control.Address != "" && (m.CertFile == "" || m.KeyFile == "" || m.CAFile == "") {
+			errs = append(errs, errors.New("control.identity.mtls.cert_file, key_file and ca_file (or grpc.identity's files) are required under control.identity.mode mtls"))
+		}
+		if m.ServerName == "" {
+			errs = append(errs, errors.New("control.identity.mtls.server_name is required"))
+		}
+	case "development":
+		if c.Control.Address != "" && !c.Development.Enabled {
+			errs = append(errs, errors.New("control.identity.mode development (plaintext) requires development.enabled: true (DEVELOPMENT_ONLY)"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("control.identity.mode %q is not one of mtls, development", c.Control.Identity.Mode))
+	}
+	if c.Outbox.ForwarderEnabled {
+		errs = append(errs, c.Outbox.NATS.TLS.validate("outbox.nats.tls", c.Development.Enabled)...)
+	}
+	if c.Telemetry.OTLPEndpoint != "" {
+		errs = append(errs, c.Telemetry.OTLPTLS.validate("telemetry.otlp_tls", c.Development.Enabled)...)
+	}
+	return errs
+}
+
+var trustDomainPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`)
+
+// DevelopmentTrustDomain is the trust domain of the development foundation.
+const DevelopmentTrustDomain = "anvilkit.local"
+
+// TrustDomain is the configured trust domain, or the development default
+// when development is enabled and none was named.
+func (c Config) TrustDomain() string {
+	if c.GRPC.Identity.TrustDomain == "" {
+		return DevelopmentTrustDomain
+	}
+	return c.GRPC.Identity.TrustDomain
+}
+
+// ControlMTLS is the Control client's identity material: its own files or,
+// when empty, the listener's (one workload identity per process).
+func (c Config) ControlMTLS() ClientTLS {
+	m := c.Control.Identity.MTLS
+	if m.CertFile == "" && m.KeyFile == "" && m.CAFile == "" {
+		m.CertFile, m.KeyFile, m.CAFile = c.GRPC.Identity.CertFile, c.GRPC.Identity.KeyFile, c.GRPC.Identity.CAFile
+	}
+	return m
+}
+
+func (t ClientTLS) validate(name string, development bool) []error {
+	var errs []error
+	switch t.Mode {
+	case "development":
+		if !development {
+			errs = append(errs, fmt.Errorf("%s.mode development (plaintext) requires development.enabled: true (DEVELOPMENT_ONLY)", name))
+		}
+	case "tls":
+		if t.CAFile == "" {
+			errs = append(errs, fmt.Errorf("%s.ca_file is required under %s.mode tls", name, name))
+		}
+	case "mtls":
+		if t.CAFile == "" || t.CertFile == "" || t.KeyFile == "" {
+			errs = append(errs, fmt.Errorf("%s.ca_file, cert_file and key_file are required under %s.mode mtls", name, name))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("%s.mode %q is not one of development, tls, mtls", name, t.Mode))
+	}
+	return errs
 }
