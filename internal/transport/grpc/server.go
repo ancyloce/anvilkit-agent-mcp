@@ -1,8 +1,9 @@
 // Package grpc is MCP's grpc-go transport (A03) for the owner surfaces of
 // P14: BackgroundTaskService. Requests are validated by protovalidate
 // before any handler runs; domain errors map to the public codes of
-// contracts.md §4. The listener is plaintext (DEVELOPMENT_ONLY; workload
-// mTLS is ENV-03), like the other new services.
+// contracts.md §4. Under an Identity the listener is mTLS-only and every
+// RPC is authorized by the peer's workload identity (P0.1); without one it
+// is the DEVELOPMENT_ONLY plaintext listener that authorizes nothing.
 package grpc
 
 import (
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -28,6 +30,7 @@ import (
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/adapters/postgres"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/application"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/domain"
+	"github.com/ancyloce/anvilkit-agent-mcp/internal/transport/identity"
 )
 
 // Tasks is the owner surface the transport needs.
@@ -45,15 +48,59 @@ type Server struct {
 	ln     net.Listener
 }
 
+// Identity is the listener's transport: with a Reloader the server is
+// mTLS-only (TLS 1.3, client certificates required and verified against the
+// current bundle, every RPC authorized by the peer's workload identity
+// under TrustDomain through Policy); nil is the DEVELOPMENT_ONLY plaintext
+// listener the configuration loader admits only under development.enabled.
+type Identity struct {
+	Reloader         *identity.Reloader
+	TrustDomain      string
+	Policy           identity.Policy
+	MaxConnectionAge time.Duration
+}
+
+// NewServer is the development (plaintext) listener.
 func NewServer(listen string, capacity int, tasks Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls) (*Server, error) {
+	return NewServerWithIdentity(listen, nil, capacity, tasks, catalog, grants, calls)
+}
+
+// NewServerWithIdentity is NewServer with the listener identity.
+func NewServerWithIdentity(listen string, id *Identity, capacity int, tasks Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls) (*Server, error) {
 	validator, err := protovalidate.New()
 	if err != nil {
 		return nil, err
 	}
 	slots := make(chan struct{}, capacity)
+	unary := []grpc.UnaryServerInterceptor{bounded(slots), validateUnary(validator)}
+	var stream []grpc.StreamServerInterceptor
+	var authz *identity.Authorizer
 	// Spans carry the gRPC semantic attributes only (service, method, status
 	// code; no messages or metadata) and continue the callers' traces.
-	s := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()), grpc.ChainUnaryInterceptor(bounded(slots), validateUnary(validator)))
+	opts := []grpc.ServerOption{grpc.StatsHandler(otelgrpc.NewServerHandler())}
+	if id != nil {
+		if id.Reloader == nil {
+			return nil, errors.New("identity: mtls needs loaded material")
+		}
+		authz, err = identity.NewAuthorizer(id.TrustDomain, id.Policy)
+		if err != nil {
+			return nil, err
+		}
+		// Authorization runs first: an unauthorized caller never reaches the
+		// capacity slots or validation.
+		unary = append([]grpc.UnaryServerInterceptor{authz.Unary()}, unary...)
+		stream = append(stream, authz.Stream())
+		age := id.MaxConnectionAge
+		if age <= 0 {
+			age = time.Hour
+		}
+		opts = append(opts, grpc.Creds(identity.NewServerCredentials(id.Reloader)), grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: age, MaxConnectionAgeGrace: 30 * time.Second}))
+	}
+	opts = append(opts, grpc.ChainUnaryInterceptor(unary...))
+	if len(stream) > 0 {
+		opts = append(opts, grpc.ChainStreamInterceptor(stream...))
+	}
+	s := grpc.NewServer(opts...)
 	h := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(s, h)
 	mcpv1.RegisterBackgroundTaskServiceServer(s, &backgroundServer{tasks: tasks})
@@ -65,6 +112,19 @@ func NewServer(listen string, capacity int, tasks Tasks, catalog *application.Ca
 		mcpv1.RegisterCallServiceServer(s, &callServer{calls: calls})
 	}
 	h.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	if id != nil {
+		registered := map[string]bool{}
+		for name := range s.GetServiceInfo() {
+			registered[name] = true
+		}
+		scoped, err := identity.NewAuthorizer(id.TrustDomain, registeredOnly(id.Policy, registered))
+		if err != nil {
+			return nil, err
+		}
+		if err := scoped.Check(s); err != nil {
+			return nil, err
+		}
+	}
 	return &Server{grpc: s, health: h, listen: listen}, nil
 }
 
