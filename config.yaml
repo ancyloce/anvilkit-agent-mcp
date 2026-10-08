@@ -3,6 +3,7 @@
 # is defaults < this file < a validated Apollo snapshot (non-secret keys,
 # ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE with apollo.mode: snapshot) < the
 # allowlisted environment: ANVILKIT_MCP_LISTEN, ANVILKIT_MCP_HEALTH_LISTEN,
+# ANVILKIT_MCP_IDENTITY_{CERT,KEY,CA}_FILE, ANVILKIT_MCP_IDENTITY_TRUST_DOMAIN,
 # ANVILKIT_MCP_DATABASE_URL or ANVILKIT_MCP_DATABASE_URL_FILE (the secret,
 # environment or mounted file only), ANVILKIT_MCP_NATS_URL,
 # ANVILKIT_MCP_CONTROL_ADDRESS, ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE,
@@ -19,10 +20,31 @@
 # (ANVILKIT_MCP_ROLES_FILE) and the grant barrier with Control
 # (ANVILKIT_MCP_CONTROL_ADDRESS). P19: guarded tool calls (calls.*); DEVELOPMENT_ONLY
 # bounds below are not production capacity.
+# development: the top-level DEVELOPMENT_ONLY guard (P0.1). This checked-in
+# file configures host-side runs on the development foundation
+# (deploy/dev), whose NATS and OTLP collector are plaintext; every plaintext
+# connection below names its own development mode as well. The guard
+# downgrades nothing by itself: the gRPC listener and the Control clients
+# stay mTLS. The chart renders its own file with the guard off.
+development:
+  enabled: true
 grpc:
   listen: 127.0.0.1:9106
   capacity: 64
   shutdown_timeout: 20s
+  # identity: the listener's workload identity (P0.1). mtls serves TLS 1.3
+  # with required, verified client certificates and authorizes every RPC by
+  # the peer's SPIFFE URI SAN under trust_domain; the files are placements
+  # (ANVILKIT_MCP_IDENTITY_{CERT,KEY,CA}_FILE, .local/dev/certs on the
+  # foundation) watched and reloaded as a whole. development is plaintext
+  # and authorizes nothing (requires development.enabled).
+  identity:
+    mode: mtls
+    trust_domain: anvilkit.local
+    max_connection_age: 1h
+    reload_interval: 5s
+# health: the plaintext HTTP probe and metrics listener (/healthz, /readyz,
+# /metrics); never a business endpoint.
 health:
   listen: 127.0.0.1:9116
 database:
@@ -50,10 +72,23 @@ outbox:
   nats:
     publish_timeout: 5s
     name: anvilkit-agent-mcp
+    # tls: development is the foundation's plaintext NATS (DEVELOPMENT_ONLY,
+    # needs development.enabled); tls verifies the server against ca_file,
+    # mtls also presents cert_file/key_file (server-side TLS and credential
+    # delivery are P0.6).
+    tls:
+      mode: development
 control:
   # The original-dispatch query of an external-effect lease
   # (ANVILKIT_MCP_CONTROL_ADDRESS); without it such a lease is never reassigned.
   timeout: 5s
+  # identity: mtls presents the workload certificate (grpc.identity's files
+  # unless mtls names its own) and verifies Control by server_name;
+  # development is plaintext (needs development.enabled).
+  identity:
+    mode: mtls
+    mtls:
+      server_name: anvilkit-agent-control
 apollo:
   mode: disabled
   app_id: anvilkit-agent-mcp
@@ -98,3 +133,8 @@ calls:
   # outcome recorded UNKNOWN, UNKNOWN calls resolved from Control only.
   reconcile_interval: 2s
   reconcile_age: 2m
+telemetry:
+  # otlp_tls: the collector transport while ANVILKIT_MCP_TELEMETRY_OTLP_ENDPOINT
+  # is placed; development is the foundation's plaintext collector.
+  otlp_tls:
+    mode: development
