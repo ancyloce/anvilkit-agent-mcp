@@ -7,4 +7,4 @@ metadata:
     {{- include "anvilkit-agent-mcp.labels" . | nindent 4 }}
 data:
   config.yaml: |
-    {{- toYaml .Values.config | nindent 4 }}
+    {{- include "anvilkit-agent-mcp.config" . | nindent 4 }}

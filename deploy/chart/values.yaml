@@ -32,13 +32,48 @@ serviceAccount:
   name: ""
   automountServiceAccountToken: false
 
-# The gRPC listener inside the Pod (ANVILKIT_MCP_LISTEN) and the plaintext
-# probe/metrics listener (ANVILKIT_MCP_HEALTH_LISTEN).
+# The gRPC listener inside the Pod (ANVILKIT_MCP_LISTEN); under
+# identity.mode mtls it is mTLS-only and no probe targets it. The plaintext
+# probe/metrics listener (ANVILKIT_MCP_HEALTH_LISTEN): /healthz, /readyz and
+# /metrics only, bound on the Pod IP for the kubelet, not exposed by the
+# Service.
 listen:
   address: 0.0.0.0
   port: 9106
 health:
   port: 9116
+
+# The listener's workload identity (P0.1). mtls (the default) serves TLS 1.3
+# with required client certificates verified against the mounted CA bundle
+# and authorizes every RPC by the peer's SPIFFE URI SAN
+# (spiffe://<trustDomain>/ns/<namespace>/sa/<service-account>) under the
+# reviewed allowlist; the same certificate is the identity the Control
+# clients and the relay container present. The certificate is a cert-manager
+# Certificate this chart renders (certificate.create) from issuerRef, or an
+# existing Secret (secretName, keys tls.crt, tls.key, ca.crt) when create is
+# false; the files are mounted at /etc/anvilkit/identity and reloaded as a
+# whole. development is the plaintext listener of the development
+# foundation and renders only with development.enabled: true.
+identity:
+  mode: mtls
+  trustDomain: ""
+  secretName: ""
+  certificate:
+    create: true
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+    duration: 2160h
+    renewBefore: 720h
+  maxConnectionAge: 1h
+
+# The top-level DEVELOPMENT_ONLY guard: every development transport below
+# (identity.mode, control.identity.mode, nats.tls.mode,
+# telemetry.otlpTls.mode) renders only while this is true; it downgrades
+# nothing by itself.
+development:
+  enabled: false
 
 # The application-role connection: a Secret mounted as a file
 # (ANVILKIT_MCP_DATABASE_URL_FILE) so a rotated secret publishes a new
@@ -48,13 +83,28 @@ database:
     name: ""
     key: url
 
-# The JetStream placement of the in-process forwarder (ANVILKIT_MCP_NATS_URL). Required.
+# The JetStream placement of the in-process forwarder (ANVILKIT_MCP_NATS_URL).
+# Required. tls is the transport: tls verifies the server against the CA
+# bundle of caSecret (key ca.crt); mtls additionally presents the workload
+# certificate of identity; development is the plaintext NATS of the
+# development foundation (development.enabled only).
 nats:
   url: ""
+  tls:
+    mode: tls
+    caSecret:
+      name: ""
+      key: ca.crt
 
-# The Control placement of the original-dispatch query (ANVILKIT_MCP_CONTROL_ADDRESS); optional.
+# The Control placement of the original-dispatch query and the grant barrier
+# (ANVILKIT_MCP_CONTROL_ADDRESS); optional. identity.mode mtls presents the
+# workload certificate and verifies Control by serverName; development is
+# plaintext (development.enabled only).
 control:
   address: ""
+  identity:
+    mode: mtls
+    serverName: anvilkit-agent-control
 
 # The owner queue relay sidecar (the background-worker image's relay entry):
 # consumes this owner's background.requested subject with the fixed durable
@@ -93,6 +143,8 @@ config:
     listen: 127.0.0.1:9106
     capacity: 64
     shutdown_timeout: 20s
+    identity:
+      reload_interval: 5s
   health:
     listen: 127.0.0.1:9116
   database:
@@ -180,3 +232,12 @@ podDisruptionBudget:
 # Scraping is the environment's pod annotations.
 telemetry:
   otlpEndpoint: ""
+  # The collector transport while otlpEndpoint is set: tls verifies the
+  # collector against caSecret (key ca.crt) and serverName, mtls also presents
+  # the workload certificate, development is plaintext (development.enabled).
+  otlpTls:
+    mode: tls
+    serverName: ""
+    caSecret:
+      name: ""
+      key: ca.crt

@@ -1,4 +1,5 @@
 {{- include "anvilkit-agent-mcp.require" . -}}
+{{- $cfg := include "anvilkit-agent-mcp.config" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,7 +22,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/config: {{ toYaml .Values.config | sha256sum }}
+        checksum/config: {{ $cfg | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -73,9 +74,13 @@ spec:
             - name: health
               containerPort: {{ .Values.health.port }}
               protocol: TCP
+          # The probes target the plaintext health listener: the kubelet
+          # presents no client certificate and the mTLS business listener
+          # refuses a handshake without one.
           startupProbe:
-            grpc:
-              port: {{ .Values.listen.port }}
+            httpGet:
+              path: /readyz
+              port: health
             periodSeconds: {{ .Values.probes.startup.periodSeconds }}
             failureThreshold: {{ .Values.probes.startup.failureThreshold }}
           readinessProbe:
@@ -99,6 +104,21 @@ spec:
             - name: database
               mountPath: /var/run/secrets/anvilkit/database
               readOnly: true
+            {{- if eq .Values.identity.mode "mtls" }}
+            - name: identity
+              mountPath: /etc/anvilkit/identity
+              readOnly: true
+            {{- end }}
+            {{- if ne .Values.nats.tls.mode "development" }}
+            - name: nats-ca
+              mountPath: /etc/anvilkit/nats-ca
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.telemetry.otlpEndpoint (ne .Values.telemetry.otlpTls.mode "development") }}
+            - name: otlp-ca
+              mountPath: /etc/anvilkit/otlp-ca
+              readOnly: true
+            {{- end }}
         {{- if .Values.relay.enabled }}
         - name: relay
           image: {{ include "anvilkit-agent-mcp.relayImage" . | quote }}
@@ -121,6 +141,20 @@ spec:
               value: /var/run/secrets/anvilkit/relay-database/{{ .Values.relay.database.secret.key }}
             - name: ANVILKIT_BACKGROUND_WORKER_QUEUE_URL_FILE
               value: /var/run/secrets/anvilkit/queue/{{ .Values.relay.queue.secret.key }}
+            # The relay dials this owner's BackgroundTaskService with the Pod's
+            # workload certificate (the MCP identity) under identity.mode.
+            - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_MODE
+              value: {{ .Values.identity.mode | quote }}
+            {{- if eq .Values.identity.mode "mtls" }}
+            - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_CERT_FILE
+              value: /etc/anvilkit/identity/tls.crt
+            - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_KEY_FILE
+              value: /etc/anvilkit/identity/tls.key
+            - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_CA_FILE
+              value: /etc/anvilkit/identity/ca.crt
+            - name: ANVILKIT_BACKGROUND_WORKER_OWNER_SERVER_NAME
+              value: {{ include "anvilkit-agent-mcp.fullname" . | quote }}
+            {{- end }}
           ports:
             - name: relay-health
               containerPort: {{ .Values.relay.healthPort }}
@@ -146,6 +180,11 @@ spec:
             - name: queue
               mountPath: /var/run/secrets/anvilkit/queue
               readOnly: true
+            {{- if eq .Values.identity.mode "mtls" }}
+            - name: identity
+              mountPath: /etc/anvilkit/identity
+              readOnly: true
+            {{- end }}
         {{- end }}
       volumes:
         - name: config
@@ -161,6 +200,28 @@ spec:
         - name: queue
           secret:
             secretName: {{ .Values.relay.queue.secret.name }}
+        {{- end }}
+        {{- if eq .Values.identity.mode "mtls" }}
+        - name: identity
+          secret:
+            secretName: {{ include "anvilkit-agent-mcp.identitySecret" . }}
+            defaultMode: 0440
+        {{- end }}
+        {{- if ne .Values.nats.tls.mode "development" }}
+        - name: nats-ca
+          secret:
+            secretName: {{ .Values.nats.tls.caSecret.name }}
+            items:
+              - key: {{ .Values.nats.tls.caSecret.key }}
+                path: ca.crt
+        {{- end }}
+        {{- if and .Values.telemetry.otlpEndpoint (ne .Values.telemetry.otlpTls.mode "development") }}
+        - name: otlp-ca
+          secret:
+            secretName: {{ .Values.telemetry.otlpTls.caSecret.name }}
+            items:
+              - key: {{ .Values.telemetry.otlpTls.caSecret.key }}
+                path: ca.crt
         {{- end }}
       {{- with .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
