@@ -11,6 +11,7 @@ import (
 	mcpv1 "github.com/ancyloce/anvilkit-agent-contracts/go/anvilkit/mcp/v1"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/application"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/domain"
+	"github.com/ancyloce/anvilkit-agent-mcp/internal/transport/identity"
 )
 
 // catalogServer and grantServer adapt anvilkit.mcp.v1 CatalogService and
@@ -69,8 +70,15 @@ func cmdOf(c *mcpv1.CommandIdentity) application.Command {
 	return application.Command{TenantID: c.GetTenantId(), CommandID: c.GetCommandId(), ActorID: c.GetActorId(), RequestDigest: c.GetRequestDigest()}
 }
 
-func scopeOf(s *mcpv1.Scope) application.Scope {
-	return application.Scope{TenantID: s.GetTenantId(), ProjectID: s.GetProjectId(), ActorID: s.GetActorId()}
+// scopeOf maps the caller's scope. Roles are verified user claims the API
+// carries (P0.3); they count only when the verified caller is the API
+// workload, never from a Job's sidecar or an unverified connection.
+func scopeOf(ctx context.Context, s *mcpv1.Scope) application.Scope {
+	out := application.Scope{TenantID: s.GetTenantId(), ProjectID: s.GetProjectId(), ActorID: s.GetActorId()}
+	if p, ok := identity.Caller(ctx); ok && p.Namespace == api.Namespace && p.ServiceAccount == api.ServiceAccount {
+		out.Roles = s.GetRoles()
+	}
+	return out
 }
 
 func toDescriptor(d domain.Descriptor) *mcpv1.Descriptor {
@@ -123,7 +131,7 @@ var catalogStateOf = map[mcpv1.CatalogState]string{
 }
 
 func (s *catalogServer) ListCatalog(ctx context.Context, req *mcpv1.ListCatalogRequest) (*mcpv1.ListCatalogResponse, error) {
-	ds, next, err := s.catalog.List(ctx, scopeOf(req.GetScope()), catalogStateOf[req.GetState()], req.GetCursor(), int(req.GetLimit()))
+	ds, next, err := s.catalog.List(ctx, scopeOf(ctx, req.GetScope()), catalogStateOf[req.GetState()], req.GetCursor(), int(req.GetLimit()))
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -139,7 +147,7 @@ func (s *catalogServer) GetDescriptor(ctx context.Context, req *mcpv1.GetDescrip
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	d, err := s.catalog.Get(ctx, scopeOf(req.GetScope()), req.GetServerId(), rev)
+	d, err := s.catalog.Get(ctx, scopeOf(ctx, req.GetScope()), req.GetServerId(), rev)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -159,7 +167,7 @@ func (s *catalogServer) DiscoverServer(ctx context.Context, req *mcpv1.DiscoverS
 		decl.Tools = append(decl.Tools, domain.ToolDeclaration{Method: t.GetMethod(), InputSchemaDigest: t.GetInputSchemaDigest(), OutputSchemaDigest: t.GetOutputSchemaDigest(),
 			SideEffecting: t.GetSideEffecting(), UnitPrice: price, Idempotent: t.GetIdempotent(), QuerySupported: t.GetQuerySupported()})
 	}
-	d, existing, err := s.catalog.Discover(ctx, cmdOf(req.GetCommand()), scopeOf(req.GetScope()), decl)
+	d, existing, err := s.catalog.Discover(ctx, cmdOf(req.GetCommand()), scopeOf(ctx, req.GetScope()), decl)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -175,7 +183,7 @@ func (s *catalogServer) ReviewDescriptor(ctx context.Context, req *mcpv1.ReviewD
 	if req.GetDecision() == mcpv1.ReviewDecision_REVIEW_DECISION_REJECT {
 		decision = domain.ReviewReject
 	}
-	d, existing, err := s.catalog.Review(ctx, cmdOf(req.GetCommand()), scopeOf(req.GetScope()), req.GetServerId(), rev, req.GetDescriptorDigest(), decision, req.GetReasonCode())
+	d, existing, err := s.catalog.Review(ctx, cmdOf(req.GetCommand()), scopeOf(ctx, req.GetScope()), req.GetServerId(), rev, req.GetDescriptorDigest(), decision, req.GetReasonCode())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -187,7 +195,7 @@ func (s *catalogServer) DisableDescriptor(ctx context.Context, req *mcpv1.Disabl
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	d, existing, err := s.catalog.Disable(ctx, cmdOf(req.GetCommand()), scopeOf(req.GetScope()), req.GetServerId(), rev, req.GetReasonCode())
+	d, existing, err := s.catalog.Disable(ctx, cmdOf(req.GetCommand()), scopeOf(ctx, req.GetScope()), req.GetServerId(), rev, req.GetReasonCode())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -210,7 +218,7 @@ func (s *grantServer) CreateGrant(ctx context.Context, req *mcpv1.CreateGrantReq
 		at := req.GetExpiresAt().AsTime()
 		gr.ExpiresAt = &at
 	}
-	g, existing, err := s.grants.Create(ctx, cmdOf(req.GetCommand()), scopeOf(req.GetScope()), gr)
+	g, existing, err := s.grants.Create(ctx, cmdOf(req.GetCommand()), scopeOf(ctx, req.GetScope()), gr)
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -218,7 +226,7 @@ func (s *grantServer) CreateGrant(ctx context.Context, req *mcpv1.CreateGrantReq
 }
 
 func (s *grantServer) GetGrant(ctx context.Context, req *mcpv1.GetGrantRequest) (*mcpv1.GetGrantResponse, error) {
-	g, err := s.grants.Get(ctx, scopeOf(req.GetScope()), req.GetGrantId())
+	g, err := s.grants.Get(ctx, scopeOf(ctx, req.GetScope()), req.GetGrantId())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -231,7 +239,7 @@ var grantStateOf = map[mcpv1.GrantState]string{
 }
 
 func (s *grantServer) ListGrants(ctx context.Context, req *mcpv1.ListGrantsRequest) (*mcpv1.ListGrantsResponse, error) {
-	gs, next, err := s.grants.List(ctx, scopeOf(req.GetScope()), grantStateOf[req.GetState()], req.GetCursor(), int(req.GetLimit()))
+	gs, next, err := s.grants.List(ctx, scopeOf(ctx, req.GetScope()), grantStateOf[req.GetState()], req.GetCursor(), int(req.GetLimit()))
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -247,7 +255,7 @@ func (s *grantServer) RevokeGrant(ctx context.Context, req *mcpv1.RevokeGrantReq
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	g, existing, err := s.grants.Revoke(ctx, cmdOf(req.GetCommand()), scopeOf(req.GetScope()), req.GetGrantId(), rev, req.GetReasonCode())
+	g, existing, err := s.grants.Revoke(ctx, cmdOf(req.GetCommand()), scopeOf(ctx, req.GetScope()), req.GetGrantId(), rev, req.GetReasonCode())
 	if err != nil {
 		return nil, toStatus(err)
 	}
@@ -255,7 +263,7 @@ func (s *grantServer) RevokeGrant(ctx context.Context, req *mcpv1.RevokeGrantReq
 }
 
 func (s *grantServer) GetRevocationProgress(ctx context.Context, req *mcpv1.GetRevocationProgressRequest) (*mcpv1.GetRevocationProgressResponse, error) {
-	p, err := s.grants.Progress(ctx, scopeOf(req.GetScope()), req.GetGrantId())
+	p, err := s.grants.Progress(ctx, scopeOf(ctx, req.GetScope()), req.GetGrantId())
 	if err != nil {
 		return nil, toStatus(err)
 	}

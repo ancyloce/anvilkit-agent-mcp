@@ -54,7 +54,7 @@ func (s *callServer) CreateCall(ctx context.Context, req *mcpv1.CreateCallReques
 	if err != nil {
 		return nil, toStatus(err)
 	}
-	call, existing, err := s.calls.Create(ctx, cmdOf(req.GetCommand()), scopeOf(req.GetScope()), domain.CallRequest{
+	call, existing, err := s.calls.Create(ctx, cmdOf(req.GetCommand()), scopeOf(ctx, req.GetScope()), domain.CallRequest{
 		GrantID: req.GetGrantId(), GrantRevision: rev, Method: req.GetMethod(), ArgumentRef: req.GetArgumentRef(), ArgumentDigest: req.GetArgumentDigest(),
 		Arguments: req.GetArguments(), OperationID: req.GetOperationId(), AttemptID: req.GetAttemptId(), InstanceID: req.GetInstanceId(),
 		ExecutionEpoch: epoch, Deadline: req.GetDeadline().AsTime(),
@@ -66,7 +66,7 @@ func (s *callServer) CreateCall(ctx context.Context, req *mcpv1.CreateCallReques
 }
 
 func (s *callServer) GetCall(ctx context.Context, req *mcpv1.GetCallRequest) (*mcpv1.GetCallResponse, error) {
-	call, err := s.calls.Get(ctx, scopeOf(req.GetScope()), req.GetCallId())
+	call, err := s.calls.Get(ctx, scopeOf(ctx, req.GetScope()), req.GetCallId())
 	if err != nil {
 		return nil, toStatus(err)
 	}
