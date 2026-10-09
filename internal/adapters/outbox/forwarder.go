@@ -32,6 +32,11 @@ type ForwarderConfig struct {
 	// NATSTLS is the verified transport (nil under the DEVELOPMENT_ONLY
 	// plaintext foundation, admitted by the configuration guard only).
 	NATSTLS *tls.Config
+	// NATSCredsFile is the mounted client credential, a user .creds file or,
+	// with NATSCredsNKey, a bare NKey user seed (classified by the
+	// configuration); empty only under the DEVELOPMENT_ONLY foundation.
+	NATSCredsFile string
+	NATSCredsNKey bool
 }
 
 // Forwarder is the watermill forwarder (C07): the watermill-sql subscriber
@@ -56,6 +61,13 @@ func NewForwarder(pool *pgxpool.Pool, cfg ForwarderConfig, log *slog.Logger, for
 	opts := []nats.Option{nats.Name(cfg.NATSName), nats.Timeout(cfg.PublishTimeout), nats.MaxReconnects(-1), nats.RetryOnFailedConnect(false)}
 	if cfg.NATSTLS != nil {
 		opts = append(opts, nats.Secure(cfg.NATSTLS))
+	}
+	creds, err := natsCredentials(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if creds != nil {
+		opts = append(opts, creds)
 	}
 	nc, err := nats.Connect(cfg.NATSURL, opts...)
 	if err != nil {
@@ -94,6 +106,29 @@ func NewForwarder(pool *pgxpool.Pool, cfg ForwarderConfig, log *slog.Logger, for
 		return nil, fmt.Errorf("forwarder: %w", err)
 	}
 	return &Forwarder{nc: nc, sub: sub, pub: pub, fwd: fwd, log: log, closeTTL: cfg.CloseTimeout}, nil
+}
+
+// natsCredentials is the authentication option of the connection (nil
+// without a credential file). Both options read the mounted file when the
+// connection authenticates, never at configuration time only: the .creds
+// option re-reads the JWT and the seed on every (re)connect, so a rotated
+// CSI file is presented on the next reconnect; the seed option derives the
+// public key here and re-reads the seed to sign each nonce, so a seed
+// rotated to a new key takes effect with the next configuration generation
+// (the credential digest is part of its secret revision).
+func natsCredentials(cfg ForwarderConfig) (nats.Option, error) {
+	switch {
+	case cfg.NATSCredsFile == "":
+		return nil, nil
+	case cfg.NATSCredsNKey:
+		opt, err := nats.NkeyOptionFromSeed(cfg.NATSCredsFile)
+		if err != nil {
+			return nil, fmt.Errorf("nats credentials: %w", err)
+		}
+		return opt, nil
+	default:
+		return nats.UserCredentials(cfg.NATSCredsFile), nil
+	}
 }
 
 // Run forwards until ctx ends or Close is called.

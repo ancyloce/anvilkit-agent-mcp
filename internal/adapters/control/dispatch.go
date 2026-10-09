@@ -44,10 +44,10 @@ func Dial(address string, timeout time.Duration, transport grpc.DialOption) (*Di
 
 func (d *DispatchQuery) Close() error { return d.conn.Close() }
 
-func (d *DispatchQuery) Outcome(ctx context.Context, dispatchID string) (domain.DispatchOutcome, error) {
+func (d *DispatchQuery) Outcome(ctx context.Context, tenantID, dispatchID string) (domain.DispatchOutcome, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-	resp, err := d.client.GetDispatch(ctx, &controlv1.GetDispatchRequest{DispatchId: dispatchID, Owner: Owner})
+	resp, err := d.client.GetDispatch(ctx, &controlv1.GetDispatchRequest{DispatchId: dispatchID, Owner: Owner, TenantId: tenantID})
 	if err != nil {
 		return domain.DispatchUnknown, err
 	}
@@ -106,10 +106,10 @@ func (d *DispatchQuery) ObserveTool(ctx context.Context, dispatchID string, sequ
 }
 
 // GetTool reads Control's record of a dispatch.
-func (d *DispatchQuery) GetTool(ctx context.Context, dispatchID string) (application.DispatchView, error) {
+func (d *DispatchQuery) GetTool(ctx context.Context, tenantID, dispatchID string) (application.DispatchView, error) {
 	ctx, cancel := context.WithTimeout(ctx, d.timeout)
 	defer cancel()
-	resp, err := d.client.GetDispatch(ctx, &controlv1.GetDispatchRequest{DispatchId: dispatchID, Owner: Owner})
+	resp, err := d.client.GetDispatch(ctx, &controlv1.GetDispatchRequest{DispatchId: dispatchID, Owner: Owner, TenantId: tenantID})
 	if err != nil {
 		return application.DispatchView{}, err
 	}
