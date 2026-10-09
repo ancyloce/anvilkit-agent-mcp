@@ -43,7 +43,7 @@ type fakeDispatch struct {
 	calls   int
 }
 
-func (f *fakeDispatch) Outcome(context.Context, string) (domain.DispatchOutcome, error) {
+func (f *fakeDispatch) Outcome(context.Context, string, string) (domain.DispatchOutcome, error) {
 	f.calls++
 	return f.outcome, nil
 }

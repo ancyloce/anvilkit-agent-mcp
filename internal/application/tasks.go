@@ -37,13 +37,13 @@ func (SystemClock) Now() time.Time { return time.Now() }
 // external-effect attempt (DD-02 §4). The disabled implementation answers
 // unknown, which never releases a lease.
 type DispatchQuery interface {
-	Outcome(ctx context.Context, dispatchID string) (domain.DispatchOutcome, error)
+	Outcome(ctx context.Context, tenantID, dispatchID string) (domain.DispatchOutcome, error)
 }
 
 // NoDispatchQuery is the placement-less query: every answer is unknown.
 type NoDispatchQuery struct{}
 
-func (NoDispatchQuery) Outcome(context.Context, string) (domain.DispatchOutcome, error) {
+func (NoDispatchQuery) Outcome(context.Context, string, string) (domain.DispatchOutcome, error) {
 	return domain.DispatchUnknown, nil
 }
 
@@ -419,7 +419,7 @@ func (t *Tasks) SweepExpired(ctx context.Context, limit int32) (int, error) {
 		task := postgres.TaskFromRow(row)
 		outcome := domain.DispatchUnknown
 		if task.Effects == domain.EffectsExternal {
-			answer, qErr := t.dispatch.Outcome(ctx, task.DispatchID)
+			answer, qErr := t.dispatch.Outcome(ctx, task.TenantID, task.DispatchID)
 			if qErr != nil {
 				t.metrics.DispatchQueries.WithLabelValues("error").Inc()
 				t.log.Warn("original dispatch query failed; the lease stays unreleased", "taskId", task.TaskID, "generation", task.Generation, "error", qErr)

@@ -81,7 +81,7 @@ func (f *fakeToolDispatch) ObserveTool(_ context.Context, dispatchID string, _ u
 	return nil
 }
 
-func (f *fakeToolDispatch) GetTool(_ context.Context, dispatchID string) (application.DispatchView, error) {
+func (f *fakeToolDispatch) GetTool(_ context.Context, _, dispatchID string) (application.DispatchView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return application.DispatchView{State: f.state[dispatchID], Outcome: f.outcome[dispatchID]}, nil

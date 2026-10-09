@@ -41,6 +41,9 @@ type Scope struct {
 	TenantID  string
 	ProjectID string
 	ActorID   string
+	// Roles are the verified roles the API established for the user (P0.3);
+	// empty for any other caller.
+	Roles []string
 }
 
 func checkCommand(cmd Command, scope Scope) error {

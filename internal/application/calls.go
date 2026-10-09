@@ -78,7 +78,7 @@ type ToolDispatcher interface {
 	// ObserveTool reports an outcome under (dispatch, sequence); units is
 	// nil for UNKNOWN.
 	ObserveTool(ctx context.Context, dispatchID string, sequence uint64, outcome string, units *uint64, at time.Time) error
-	GetTool(ctx context.Context, dispatchID string) (DispatchView, error)
+	GetTool(ctx context.Context, tenantID, dispatchID string) (DispatchView, error)
 }
 
 // UpstreamTarget is what a send is qualified against.
@@ -195,8 +195,9 @@ func callerMaySend(scope Scope, g domain.Grant) bool {
 		return scope.ProjectID != "" && g.SubjectID == scope.ProjectID
 	case "actor":
 		return g.SubjectID == scope.ActorID
+	case "role":
+		return slices.Contains(scope.Roles, g.SubjectID)
 	}
-	// A role subject is not bound to callers in this build.
 	return false
 }
 
@@ -600,7 +601,7 @@ func (c *Calls) Reconcile(ctx context.Context) (int, error) {
 
 // resolve reads Control's record of an UNKNOWN call's original dispatch.
 func (c *Calls) resolve(ctx context.Context, call domain.Call) {
-	v, err := c.dispatch.GetTool(ctx, call.DispatchID)
+	v, err := c.dispatch.GetTool(ctx, call.TenantID, call.DispatchID)
 	if err != nil {
 		return
 	}
