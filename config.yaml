@@ -5,7 +5,11 @@
 # allowlisted environment: ANVILKIT_MCP_LISTEN, ANVILKIT_MCP_HEALTH_LISTEN,
 # ANVILKIT_MCP_IDENTITY_{CERT,KEY,CA}_FILE, ANVILKIT_MCP_IDENTITY_TRUST_DOMAIN,
 # ANVILKIT_MCP_DATABASE_URL or ANVILKIT_MCP_DATABASE_URL_FILE (the secret,
-# environment or mounted file only), ANVILKIT_MCP_NATS_URL,
+# environment or mounted file only; outside development a URL with
+# sslmode=verify-full, P0.6), ANVILKIT_MCP_NATS_URL,
+# ANVILKIT_MCP_NATS_TLS_{MODE,CA_FILE,CERT_FILE,KEY_FILE,SERVER_NAME},
+# ANVILKIT_MCP_NATS_CREDS_FILE (P0.6: the publisher's NATS user, a .creds file
+# or an NKey seed, environment only; required outside development),
 # ANVILKIT_MCP_CONTROL_ADDRESS, ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE,
 # ANVILKIT_MCP_UPSTREAM_CREDENTIALS_FILE (P19, the mounted upstream credential
 # bindings). Any other
