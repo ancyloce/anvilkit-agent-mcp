@@ -8,10 +8,13 @@
 // shared value is ever mutated field by field. The database URL is a
 // secret: it arrives from the environment or from a mounted secret file
 // (the OpenBao/CSI injection path) and is never accepted from the file,
-// the snapshot or the logs.
+// the snapshot or the logs. The NATS client credential is a mounted file as
+// well (P0.6): its placement comes from the environment only and its
+// content never leaves the loader except as part of the secret revision.
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -132,12 +135,32 @@ type Outbox struct {
 	NATS             NATS          `koanf:"nats"`
 }
 
+// NATS is the JetStream connection of the forwarder. TLS is accepted from
+// the file or the environment (ANVILKIT_MCP_NATS_TLS_{MODE,CA_FILE,
+// CERT_FILE,KEY_FILE,SERVER_NAME}); CredsFile is a placement
+// (ANVILKIT_MCP_NATS_CREDS_FILE only): a mounted NATS user .creds file or a
+// bare NKey user seed, read and classified at load (CredsKind) and required
+// outside development (P0.6).
 type NATS struct {
 	URL            string        `koanf:"url"`
 	PublishTimeout time.Duration `koanf:"publish_timeout"`
 	Name           string        `koanf:"name"`
 	TLS            ClientTLS     `koanf:"tls"`
+	CredsFile      string        `koanf:"creds_file"`
+	// CredsKind is NATSCredsUser or NATSCredsNKey, set by the loader from
+	// the content of CredsFile; empty without a credential.
+	CredsKind string `koanf:"-"`
 }
+
+// The kinds of a NATS client credential file.
+const (
+	// NATSCredsUser is a NATS user .creds file (the decorated user JWT and
+	// its NKey seed).
+	NATSCredsUser = "user"
+	// NATSCredsNKey is a bare NKey user seed (the first non-empty line
+	// starts with SU).
+	NATSCredsNKey = "nkey"
+)
 
 // Control is the placement of the original-dispatch query for
 // external-effect leases (DD-09 §1); without an address the owner has no
@@ -309,6 +332,12 @@ var envOverrides = map[string]string{
 	"ANVILKIT_MCP_DATABASE_URL":              "database.url",
 	"ANVILKIT_MCP_DATABASE_URL_FILE":         "database.url_file",
 	"ANVILKIT_MCP_NATS_URL":                  "outbox.nats.url",
+	"ANVILKIT_MCP_NATS_CREDS_FILE":           "outbox.nats.creds_file",
+	"ANVILKIT_MCP_NATS_TLS_MODE":             "outbox.nats.tls.mode",
+	"ANVILKIT_MCP_NATS_TLS_CA_FILE":          "outbox.nats.tls.ca_file",
+	"ANVILKIT_MCP_NATS_TLS_CERT_FILE":        "outbox.nats.tls.cert_file",
+	"ANVILKIT_MCP_NATS_TLS_KEY_FILE":         "outbox.nats.tls.key_file",
+	"ANVILKIT_MCP_NATS_TLS_SERVER_NAME":      "outbox.nats.tls.server_name",
 	"ANVILKIT_MCP_CONTROL_ADDRESS":           "control.address",
 	"ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE":      "apollo.snapshot_file",
 	"ANVILKIT_MCP_CONTEXTFORGE_URL":          "catalog.contextforge.url",
@@ -322,7 +351,7 @@ var secretKeys = []string{"database.url"}
 
 // placementKeys are per-deployment values refused inside the reviewed file
 // and inside a snapshot (they identify an environment, never a release).
-var placementKeys = []string{"database.url_file", "outbox.nats.url", "control.address", "apollo.snapshot_file", "catalog.contextforge.url", "catalog.contextforge.token_file", "catalog.roles_file", "calls.credentials_file"}
+var placementKeys = []string{"database.url_file", "outbox.nats.url", "outbox.nats.creds_file", "control.address", "apollo.snapshot_file", "catalog.contextforge.url", "catalog.contextforge.token_file", "catalog.roles_file", "calls.credentials_file"}
 
 // Generation is one complete, validated configuration: the typed snapshot,
 // its number in this process, the digest of every non-secret input as
@@ -422,6 +451,14 @@ func LoadFrom(path string, environ []string, number uint64) (Generation, error) 
 		}
 		c.Database.URL = strings.TrimSpace(string(raw))
 	}
+	natsCreds := ""
+	if c.Outbox.ForwarderEnabled && c.Outbox.NATS.CredsFile != "" {
+		kind, revision, err := readNATSCredentials(c.Outbox.NATS.CredsFile)
+		if err != nil {
+			return Generation{}, fmt.Errorf("config: outbox.nats.creds_file: %w", err)
+		}
+		c.Outbox.NATS.CredsKind, natsCreds = kind, revision
+	}
 	if err := c.validate(); err != nil {
 		return Generation{}, err
 	}
@@ -430,7 +467,7 @@ func LoadFrom(path string, environ []string, number uint64) (Generation, error) 
 		return Generation{}, err
 	}
 	return Generation{
-		Number: number, Config: c, Digest: digest, SecretRevision: secretRevision(c), Profiles: map[string]string{"local-check-v1": digestOf("local-check-v1")},
+		Number: number, Config: c, Digest: digest, SecretRevision: secretRevision(c, natsCreds), Profiles: map[string]string{"local-check-v1": digestOf("local-check-v1")},
 		ApolloRelease: release, BuiltAt: time.Now(), ExpiresAt: expiresAt,
 	}, nil
 }
@@ -477,8 +514,53 @@ func nonSecretDigest(k *koanf.Koanf) (string, error) {
 	return digestOf(string(raw)), nil
 }
 
-func secretRevision(c Config) string {
-	return digestOf("database.url=" + c.Database.URL)
+// secretRevision covers the database URL and, when one is mounted, the
+// digest of the NATS credential, so that a rotated credential file
+// produces a new generation with a fresh connection.
+func secretRevision(c Config, natsCreds string) string {
+	s := "database.url=" + c.Database.URL
+	if natsCreds != "" {
+		s += "\noutbox.nats.creds_file=" + natsCreds
+	}
+	return digestOf(s)
+}
+
+// natsUserJWTMarker opens the user JWT block of a NATS .creds file.
+var natsUserJWTMarker = []byte("-----BEGIN NATS USER JWT-----")
+
+// readNATSCredentials reads and classifies a mounted NATS client
+// credential: a user .creds file (it holds the decorated user JWT) or a
+// bare NKey user seed (the first non-empty line starts with SU). It returns
+// the kind and the content's digest; the content itself never leaves this
+// function, not even in an error, and the buffer is wiped. The connection
+// does not use what is read here: its options read the file themselves
+// when they authenticate (outbox.natsCredentials), and the digest makes a
+// rotation a new generation.
+func readNATSCredentials(path string) (kind, digest string, err error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	defer clear(raw)
+	switch {
+	case bytes.Contains(raw, natsUserJWTMarker):
+		kind = NATSCredsUser
+	case bytes.HasPrefix(firstNonEmptyLine(raw), []byte("SU")):
+		kind = NATSCredsNKey
+	default:
+		return "", "", errors.New("neither a NATS user credentials file (.creds) nor an NKey user seed")
+	}
+	sum := sha256.Sum256(raw)
+	return kind, "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func firstNonEmptyLine(raw []byte) []byte {
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if line = bytes.TrimSpace(line); len(line) > 0 {
+			return line
+		}
+	}
+	return nil
 }
 
 func digestOf(s string) string {
@@ -504,8 +586,25 @@ func (c Config) validate() error {
 	errs = append(errs, c.validateIdentity()...)
 	check(c.Database.URL != "", "database.url is required (ANVILKIT_MCP_DATABASE_URL or ANVILKIT_MCP_DATABASE_URL_FILE)")
 	if c.Database.URL != "" {
+		// Neither the URL nor its parse error is ever echoed: it carries the
+		// credential.
 		u, err := url.Parse(c.Database.URL)
-		check(err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql"), "database.url must be a postgres URL")
+		isURL := err == nil && (u.Scheme == "postgres" || u.Scheme == "postgresql")
+		check(isURL, "database.url must be a postgres URL")
+		// Outside development the connection verifies the server's
+		// certificate chain and host name (P0.6); development keeps the
+		// foundation's plaintext database (sslmode=disable).
+		if isURL && !c.Development.Enabled {
+			q := u.Query()
+			// The last occurrence wins, as in the driver (pgx follows libpq).
+			mode := ""
+			if v := q["sslmode"]; len(v) > 0 {
+				mode = v[len(v)-1]
+			}
+			check(mode == "verify-full", "database.url: sslmode must be verify-full outside development (got %q)", mode)
+			// pgx reads ssl=true in a URL as sslmode=require.
+			check(!q.Has("ssl"), "database.url: the ssl parameter is not accepted outside development (use sslmode=verify-full)")
+		}
 	}
 	check(c.Database.MaxConn >= 1 && c.Database.MaxConn <= 256, "database.max_conn must be within [1, 256]")
 	check(c.Tasks.MaxInputBytes > 0 && c.Tasks.MaxInputBytes <= 65536, "tasks.max_input_bytes must be within (0, 65536] (ClaimTaskResponse.input)")
@@ -560,7 +659,8 @@ func (c Config) validate() error {
 }
 
 // validateIdentity checks the listener identity, the top-level guard, the
-// Control client identity and the outbound TLS modes (P0.1).
+// Control client identity and the outbound TLS modes (P0.1), and the NATS
+// client credential (P0.6).
 func (c Config) validateIdentity() []error {
 	var errs []error
 	id := c.GRPC.Identity
@@ -606,7 +706,13 @@ func (c Config) validateIdentity() []error {
 		errs = append(errs, fmt.Errorf("control.identity.mode %q is not one of mtls, development", c.Control.Identity.Mode))
 	}
 	if c.Outbox.ForwarderEnabled {
+		// Outside development the TLS rules already exclude the plaintext
+		// mode; the connection also authenticates. Under the guard a
+		// mounted credential is still presented, none is admitted.
 		errs = append(errs, c.Outbox.NATS.TLS.validate("outbox.nats.tls", c.Development.Enabled)...)
+		if c.Outbox.NATS.CredsFile == "" && !c.Development.Enabled {
+			errs = append(errs, errors.New("outbox.nats.creds_file is required outside development (ANVILKIT_MCP_NATS_CREDS_FILE: a NATS user .creds file or an NKey user seed)"))
+		}
 	}
 	if c.Telemetry.OTLPEndpoint != "" {
 		errs = append(errs, c.Telemetry.OTLPTLS.validate("telemetry.otlp_tls", c.Development.Enabled)...)
