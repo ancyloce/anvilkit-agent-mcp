@@ -102,6 +102,7 @@ func buildRuntime(ctx context.Context, gen config.Generation, metrics *applicati
 		rt.forwarder, err = outbox.NewForwarder(pool, outbox.ForwarderConfig{
 			ConsumerGroup: o.ConsumerGroup, PollInterval: o.PollInterval, AckDeadline: o.AckDeadline, ResendInterval: o.ResendInterval, BatchSize: o.BatchSize,
 			NATSURL: o.NATS.URL, NATSName: o.NATS.Name, PublishTimeout: o.NATS.PublishTimeout, CloseTimeout: cfg.Reload.DrainLimit, NATSTLS: natsTLS,
+			NATSCredsFile: o.NATS.CredsFile, NATSCredsNKey: o.NATS.CredsKind == config.NATSCredsNKey,
 		}, log, metrics.Forwarded, metrics.ForwardFailures)
 		if err != nil {
 			return nil, fmt.Errorf("forwarder: %w", err)

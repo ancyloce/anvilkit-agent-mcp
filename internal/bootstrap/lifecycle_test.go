@@ -114,7 +114,9 @@ func TestLifecycleGenerationsAndShutdown(t *testing.T) {
 	secret := filepath.Join(dir, "database-url")
 	require.NoError(t, os.WriteFile(secret, []byte(inst.AppDSN), 0o600))
 	cfgFile := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(cfgFile, []byte("outbox:\n  forwarder_enabled: false\nreload:\n  interval: 200ms\n  drain_limit: 5s\ntasks:\n  sweep_interval: 200ms\n"), 0o600))
+	// The test database is plaintext (sslmode=disable): the development
+	// guard admits it (P0.6); the listener stays mTLS.
+	require.NoError(t, os.WriteFile(cfgFile, []byte("development:\n  enabled: true\noutbox:\n  forwarder_enabled: false\nreload:\n  interval: 200ms\n  drain_limit: 5s\ntasks:\n  sweep_interval: 200ms\n"), 0o600))
 	grpcAddr, healthAddr := freePort(t), freePort(t)
 	isolateEnvironment(t)
 	t.Setenv("ANVILKIT_MCP_CONFIG", cfgFile)
@@ -185,7 +187,7 @@ func TestStartupFailureUnwinds(t *testing.T) {
 	inst := testdb.Start(t)
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(cfgFile, []byte("outbox:\n  forwarder_enabled: false\n"), 0o600))
+	require.NoError(t, os.WriteFile(cfgFile, []byte("development:\n  enabled: true\noutbox:\n  forwarder_enabled: false\n"), 0o600))
 	blocker, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer blocker.Close()
@@ -212,7 +214,7 @@ func TestActiveSnapshotExpiryAndRenewal(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.yaml")
 	snapshot := filepath.Join(dir, "snapshot.json")
-	require.NoError(t, os.WriteFile(cfgFile, []byte("apollo:\n  mode: snapshot\noutbox:\n  forwarder_enabled: false\nreload:\n  interval: 100ms\n  drain_limit: 2s\n"), 0600))
+	require.NoError(t, os.WriteFile(cfgFile, []byte("development:\n  enabled: true\napollo:\n  mode: snapshot\noutbox:\n  forwarder_enabled: false\nreload:\n  interval: 100ms\n  drain_limit: 2s\n"), 0600))
 	document := func(expiry time.Time) []byte {
 		return []byte(fmt.Sprintf(`{"schemaVersion":1,"appId":"anvilkit-agent-mcp","cluster":"default","namespace":"application","releaseKey":"20260918120000-0123456789ab","fetchedAt":%q,"expiresAt":%q,"configurations":{}}`, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano), expiry.UTC().Format(time.RFC3339Nano)))
 	}

@@ -247,7 +247,7 @@ func (noToolDispatch) AdmitTool(context.Context, application.ToolAdmit) (applica
 func (noToolDispatch) ObserveTool(context.Context, string, uint64, string, *uint64, time.Time) error {
 	return errNoControl
 }
-func (noToolDispatch) GetTool(context.Context, string) (application.DispatchView, error) {
+func (noToolDispatch) GetTool(context.Context, string, string) (application.DispatchView, error) {
 	return application.DispatchView{}, errNoControl
 }
 
