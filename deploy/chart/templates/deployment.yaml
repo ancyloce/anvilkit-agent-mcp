@@ -59,10 +59,20 @@ spec:
             # The secret as a mounted file: the kubelet refreshes it when the
             # Secret changes and the generation watcher publishes the new
             # generation (a new pool, probed, then the old one drained).
+            {{- $csi := eq .Values.secrets.provider "csi" }}
             - name: ANVILKIT_MCP_DATABASE_URL_FILE
-              value: /var/run/secrets/anvilkit/database/{{ .Values.database.secret.key }}
+              value: {{ include "anvilkit-agent-mcp.credentialFile" (dict "root" . "csi" "database-url" "kube" (printf "/var/run/secrets/anvilkit/database/%s" .Values.database.secret.key)) }}
             - name: ANVILKIT_MCP_NATS_URL
               value: {{ .Values.nats.url | quote }}
+            {{- if .Values.trust.configMap }}
+            # Go: the trust bundle beside the image's roots (the DSN's sslrootcert names it too).
+            - name: SSL_CERT_DIR
+              value: /etc/ssl/certs:/etc/anvilkit/trust
+            {{- end }}
+            {{- if or $csi .Values.nats.credentials.secret.name }}
+            - name: ANVILKIT_MCP_NATS_CREDS_FILE
+              value: {{ include "anvilkit-agent-mcp.credentialFile" (dict "root" . "csi" "nats-creds" "kube" (printf "/var/run/secrets/anvilkit/nats/%s" .Values.nats.credentials.secret.forwarderKey)) }}
+            {{- end }}
             {{- if .Values.control.address }}
             - name: ANVILKIT_MCP_CONTROL_ADDRESS
               value: {{ .Values.control.address | quote }}
@@ -101,9 +111,25 @@ spec:
             - name: config
               mountPath: /etc/anvilkit/anvilkit-agent-mcp
               readOnly: true
+            {{- if .Values.trust.configMap }}
+            - name: trust
+              mountPath: /etc/anvilkit/trust
+              readOnly: true
+            {{- end }}
+            {{- if $csi }}
+            - name: credentials
+              mountPath: /var/run/secrets/anvilkit/csi
+              readOnly: true
+            {{- else }}
             - name: database
               mountPath: /var/run/secrets/anvilkit/database
               readOnly: true
+            {{- if .Values.nats.credentials.secret.name }}
+            - name: nats-credentials
+              mountPath: /var/run/secrets/anvilkit/nats
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- if eq .Values.identity.mode "mtls" }}
             - name: identity
               mountPath: /etc/anvilkit/identity
@@ -131,16 +157,42 @@ spec:
               value: /etc/anvilkit/anvilkit-agent-background-worker/config.yaml
             - name: ANVILKIT_BACKGROUND_WORKER_RELAY_OWNER
               value: mcp
+            {{- if .Values.trust.configMap }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/anvilkit/trust/ca.crt
+            {{- end }}
             - name: ANVILKIT_BACKGROUND_WORKER_MCP_ADDRESS
               value: {{ printf "127.0.0.1:%d" (int .Values.listen.port) | quote }}
             - name: ANVILKIT_BACKGROUND_WORKER_HEALTH_LISTEN
               value: {{ printf "%s:%d" .Values.listen.address (int .Values.relay.healthPort) | quote }}
             - name: ANVILKIT_BACKGROUND_WORKER_NATS_URL
               value: {{ .Values.nats.url | quote }}
+            # P0.6: the relay's own NATS transport and user, the forwarder's
+            # server verification.
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_TLS_MODE
+              value: {{ .Values.nats.tls.mode | quote }}
+            {{- if ne .Values.nats.tls.mode "development" }}
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_TLS_CA_FILE
+              value: /etc/anvilkit/nats-ca/ca.crt
+            {{- end }}
+            {{- if eq .Values.nats.tls.mode "mtls" }}
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_TLS_CERT_FILE
+              value: /etc/anvilkit/identity/tls.crt
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_TLS_KEY_FILE
+              value: /etc/anvilkit/identity/tls.key
+            {{- end }}
+            {{- if or $csi .Values.nats.credentials.secret.name }}
+            - name: ANVILKIT_BACKGROUND_WORKER_NATS_CREDS_FILE
+              value: {{ include "anvilkit-agent-mcp.credentialFile" (dict "root" . "csi" "relay-nats-creds" "kube" (printf "/var/run/secrets/anvilkit/nats/%s" .Values.nats.credentials.secret.relayKey)) }}
+            {{- end }}
             - name: ANVILKIT_BACKGROUND_WORKER_RELAY_DATABASE_URL_FILE
-              value: /var/run/secrets/anvilkit/relay-database/{{ .Values.relay.database.secret.key }}
+              value: {{ include "anvilkit-agent-mcp.credentialFile" (dict "root" . "csi" "relay-database-url" "kube" (printf "/var/run/secrets/anvilkit/relay-database/%s" .Values.relay.database.secret.key)) }}
             - name: ANVILKIT_BACKGROUND_WORKER_QUEUE_URL_FILE
-              value: /var/run/secrets/anvilkit/queue/{{ .Values.relay.queue.secret.key }}
+              value: {{ include "anvilkit-agent-mcp.credentialFile" (dict "root" . "csi" "relay-queue-url" "kube" (printf "/var/run/secrets/anvilkit/queue/%s" .Values.relay.queue.secret.key)) }}
+            {{- with .Values.relay.queue.tls.caFile }}
+            - name: ANVILKIT_BACKGROUND_WORKER_QUEUE_TLS_CA_FILE
+              value: {{ . | quote }}
+            {{- end }}
             # The relay dials this owner's BackgroundTaskService with the Pod's
             # workload certificate (the MCP identity) under identity.mode.
             - name: ANVILKIT_BACKGROUND_WORKER_IDENTITY_MODE
@@ -174,12 +226,33 @@ spec:
           resources:
             {{- toYaml .Values.relay.resources | nindent 12 }}
           volumeMounts:
+            {{- if .Values.trust.configMap }}
+            - name: trust
+              mountPath: /etc/anvilkit/trust
+              readOnly: true
+            {{- end }}
+            {{- if $csi }}
+            - name: credentials
+              mountPath: /var/run/secrets/anvilkit/csi
+              readOnly: true
+            {{- else }}
             - name: relay-database
               mountPath: /var/run/secrets/anvilkit/relay-database
               readOnly: true
             - name: queue
               mountPath: /var/run/secrets/anvilkit/queue
               readOnly: true
+            {{- if .Values.nats.credentials.secret.name }}
+            - name: nats-credentials
+              mountPath: /var/run/secrets/anvilkit/nats
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if ne .Values.nats.tls.mode "development" }}
+            - name: nats-ca
+              mountPath: /etc/anvilkit/nats-ca
+              readOnly: true
+            {{- end }}
             {{- if eq .Values.identity.mode "mtls" }}
             - name: identity
               mountPath: /etc/anvilkit/identity
@@ -190,9 +263,29 @@ spec:
         - name: config
           configMap:
             name: {{ include "anvilkit-agent-mcp.fullname" . }}
+        {{- if .Values.trust.configMap }}
+        - name: trust
+          configMap:
+            name: {{ .Values.trust.configMap }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}
+        {{- if eq .Values.secrets.provider "csi" }}
+        - name: credentials
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ include "anvilkit-agent-mcp.fullname" . }}
+        {{- else }}
         - name: database
           secret:
             secretName: {{ .Values.database.secret.name }}
+        {{- if .Values.nats.credentials.secret.name }}
+        - name: nats-credentials
+          secret:
+            secretName: {{ .Values.nats.credentials.secret.name }}
+            defaultMode: 0440
+        {{- end }}
         {{- if .Values.relay.enabled }}
         - name: relay-database
           secret:
@@ -200,6 +293,7 @@ spec:
         - name: queue
           secret:
             secretName: {{ .Values.relay.queue.secret.name }}
+        {{- end }}
         {{- end }}
         {{- if eq .Values.identity.mode "mtls" }}
         - name: identity

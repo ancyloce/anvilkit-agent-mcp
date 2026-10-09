@@ -75,6 +75,34 @@ identity:
 development:
   enabled: false
 
+# Credential delivery (P0.6). kubernetes mounts the existing Secrets named
+# below (database.secret, nats.credentials.secret, relay.database.secret,
+# relay.queue.secret): the development foundation's path. csi mounts the
+# credentials from OpenBao through the Secrets Store CSI driver (provider
+# openbao, Kubernetes auth with the Pod's ServiceAccount token of audience
+# csi.audience; no Kubernetes Secret is synced) read-only at
+# /var/run/secrets/anvilkit/csi in both containers; the service's KV v2 path
+# holds database-url and nats-creds (the forwarder's) and relay-database-url,
+# relay-queue-url and relay-nats-creds (the relay's). A rotated file publishes
+# a new configuration generation (database) or is read on reconnect (NATS).
+secrets:
+  provider: kubernetes
+  csi:
+    address: ""
+    caCertPath: ""
+    audience: openbao
+    role: ""
+    path: ""
+
+# P0.6: the data plane's CA bundle: a ConfigMap (key ca.crt) in this
+# namespace, e.g. the anvilkit-trust map deploy/qualification/bootstrap.py
+# maintains. Mounted at /etc/anvilkit/trust in every container that connects
+# to PostgreSQL (the DSNs' sslrootcert names /etc/anvilkit/trust/ca.crt) or
+# an HTTPS data store, and added to the Node processes' roots
+# (NODE_EXTRA_CA_CERTS). Empty: the image's roots only.
+trust:
+  configMap: ""
+
 # The application-role connection: a Secret mounted as a file
 # (ANVILKIT_MCP_DATABASE_URL_FILE) so a rotated secret publishes a new
 # configuration generation without a restart. Required; never created here.
@@ -95,6 +123,16 @@ nats:
     caSecret:
       name: ""
       key: ca.crt
+  # The NATS user credentials (P0.6): an NKey seed or a .creds file each for
+  # the forwarder (ANVILKIT_MCP_NATS_CREDS_FILE) and the relay
+  # (ANVILKIT_BACKGROUND_WORKER_NATS_CREDS_FILE). Under secrets.provider
+  # kubernetes an existing Secret with the two keys below; required outside
+  # development (the server admits no anonymous client).
+  credentials:
+    secret:
+      name: ""
+      forwarderKey: forwarder
+      relayKey: relay
 
 # The Control placement of the original-dispatch query and the grant barrier
 # (ANVILKIT_MCP_CONTROL_ADDRESS); optional. identity.mode mtls presents the
@@ -127,6 +165,12 @@ relay:
     secret:
       name: ""
       key: url
+    # The queue Valkey's CA inside the Pod for a rediss:// URL
+    # (ANVILKIT_BACKGROUND_WORKER_QUEUE_TLS_CA_FILE), e.g. the cluster CA of
+    # the workload identity /etc/anvilkit/identity/ca.crt; empty uses the
+    # image's roots.
+    tls:
+      caFile: ""
   healthPort: 9126
   resources:
     requests:
