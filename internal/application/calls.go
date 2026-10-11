@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -158,7 +160,16 @@ type CallOptions struct {
 	Wait           time.Duration // how long CreateCall waits for the outcome
 	ReconcileAge   time.Duration
 	ReconcileBatch int32
+	// ResolveInterval is the slower cadence at which an UNKNOWN call that
+	// waits for its original identity to be resolved at Control is asked
+	// about again (0: every pass). The rows are operator-pending: asking
+	// every pass gains nothing and crowds the pass.
+	ResolveInterval time.Duration
 }
+
+// ErrShuttingDown: the process stops admitting new calls; the caller
+// retries against another replica (the same command answers the original).
+var ErrShuttingDown = errors.New("SHUTTING_DOWN")
 
 type Calls struct {
 	store    *postgres.Store
@@ -170,10 +181,27 @@ type Calls struct {
 	clock    Clock
 	metrics  *Metrics
 	log      *slog.Logger
+
+	// Detached dispatches of this process (DD-09 §3 drain): tracked so a
+	// stop waits for them within the send bound and records what did not
+	// finish, instead of leaving marked calls to the reconciler of another
+	// replica after the Pod is gone.
+	closing  atomic.Bool
+	inflight sync.WaitGroup
+	liveMu   sync.Mutex
+	live     map[string]struct{}
+	// nextResolve throttles the Control queries of operator-pending UNKNOWN
+	// calls per call id (pruned to the rows the last pass saw).
+	resolveMu   sync.Mutex
+	nextResolve map[string]time.Time
 }
 
 func NewCalls(store *postgres.Store, dispatch ToolDispatcher, upstream map[string]Upstream, tokens Tokens, routes []QualifiedRoute, opts CallOptions, clock Clock, metrics *Metrics, log *slog.Logger) *Calls {
-	return &Calls{store: store, dispatch: dispatch, upstream: upstream, tokens: tokens, routes: routes, opts: opts, clock: clock, metrics: metrics, log: log}
+	if opts.ReconcileBatch <= 0 {
+		opts.ReconcileBatch = 50
+	}
+	return &Calls{store: store, dispatch: dispatch, upstream: upstream, tokens: tokens, routes: routes, opts: opts, clock: clock, metrics: metrics, log: log,
+		live: map[string]struct{}{}, nextResolve: map[string]time.Time{}}
 }
 
 func (c *Calls) routeOf(g domain.Grant) (string, bool) {
@@ -230,6 +258,9 @@ func (c *Calls) Get(ctx context.Context, scope Scope, callID string) (domain.Cal
 func (c *Calls) Create(ctx context.Context, cmd Command, scope Scope, req domain.CallRequest) (domain.Call, bool, error) {
 	if err := checkCommand(cmd, scope); err != nil {
 		return domain.Call{}, false, err
+	}
+	if c.closing.Load() {
+		return domain.Call{}, false, ErrShuttingDown
 	}
 	q := c.store.Queries()
 	if prev, err := q.GetToolRequestByCommand(ctx, sqlc.GetToolRequestByCommandParams{TenantID: cmd.TenantID, CommandID: cmd.CommandID}); err == nil {
@@ -314,8 +345,10 @@ func (c *Calls) Create(ctx context.Context, cmd Command, scope Scope, req domain
 	}
 	c.count(domain.CallAccepted)
 	done := make(chan struct{})
+	c.track(callID)
 	go func() {
 		defer close(done)
+		defer c.untrack(callID)
 		c.advance(context.WithoutCancel(ctx), callID)
 	}()
 	wait := time.NewTimer(c.opts.Wait)
@@ -327,6 +360,68 @@ func (c *Calls) Create(ctx context.Context, cmd Command, scope Scope, req domain
 	}
 	call, err := c.load(context.WithoutCancel(ctx), c.store.Queries(), callID)
 	return call, false, err
+}
+
+func (c *Calls) track(callID string) {
+	c.inflight.Add(1)
+	c.liveMu.Lock()
+	c.live[callID] = struct{}{}
+	c.liveMu.Unlock()
+}
+
+func (c *Calls) untrack(callID string) {
+	c.liveMu.Lock()
+	delete(c.live, callID)
+	c.liveMu.Unlock()
+	c.inflight.Done()
+}
+
+// Shutdown stops admitting calls, waits for this process's detached
+// dispatches until ctx ends (the caller bounds it by the send bound), and
+// records UNKNOWN synchronously for every call of this process still marked
+// as sent: the Pod is about to go, and a marked call without an outcome
+// must not wait for another replica's reconciler to notice it. Calls that
+// were admitted but never marked are left to the reconciler (nothing was
+// sent; it cancels them). It reports how many calls it recorded UNKNOWN.
+func (c *Calls) Shutdown(ctx context.Context) int {
+	c.closing.Store(true)
+	done := make(chan struct{})
+	go func() { c.inflight.Wait(); close(done) }()
+	select {
+	case <-done:
+		return 0
+	case <-ctx.Done():
+	}
+	c.liveMu.Lock()
+	remaining := make([]string, 0, len(c.live))
+	for id := range c.live {
+		remaining = append(remaining, id)
+	}
+	c.liveMu.Unlock()
+	slices.Sort(remaining)
+	record := context.WithoutCancel(ctx)
+	q := c.store.Queries()
+	recorded := 0
+	for _, id := range remaining {
+		code := domain.CallOutcomeUnknown
+		n, err := q.SetToolRequestOutcome(record, sqlc.SetToolRequestOutcomeParams{CallID: id, State: string(domain.CallUnknown), FailureCode: &code, Expected: []string{string(domain.CallSent)}})
+		if err != nil {
+			c.log.Warn("shutdown: outcome of an in-flight send not recorded; the reconciler marks it", "callId", id, "err", err)
+			continue
+		}
+		if n != 1 {
+			continue // finished or never marked meanwhile
+		}
+		recorded++
+		c.count(domain.CallUnknown)
+		c.log.Warn("shutdown: an in-flight send is recorded UNKNOWN; new calls to its server are restricted", "callId", id)
+		if call, err := c.load(record, q, id); err == nil {
+			observe, cancel := context.WithTimeout(record, 5*time.Second)
+			c.observe(observe, call)
+			cancel()
+		}
+	}
+	return recorded
 }
 
 func (c *Calls) count(s domain.CallState) {
@@ -445,6 +540,13 @@ func (c *Calls) send(ctx context.Context, call domain.Call) {
 		return
 	}
 	defer sess.Close()
+	// A send bound that elapsed during qualification: nothing is sent, the
+	// permission is canceled (a marker would make a never-sent call UNKNOWN).
+	if sendCtx.Err() != nil {
+		c.log.Warn("send bound elapsed before the marker; call not sent", "callId", call.CallID, "err", sendCtx.Err())
+		c.cancel(ctx, call, domain.CallNotSent)
+		return
+	}
 	// The marker commits with the grant still executable under its share
 	// lock: a revocation that committed first is seen here, one that commits
 	// later counts this call as open until its outcome is observed.
@@ -564,39 +666,126 @@ func (c *Calls) observe(ctx context.Context, call domain.Call) {
 // without an outcome is UNKNOWN; an UNKNOWN call is resolved only from
 // Control's record of its original dispatch (an operator's not-sent
 // confirmation or observation); unobserved outcomes are reported again.
+//
+// A pass walks every open row in keyset-ordered pages of ReconcileBatch
+// (the cursor is the last row's (updated_at, call_id)): rows the pass
+// cannot advance — UNKNOWN calls waiting for Control — are passed over and
+// never hide the rows behind them. A marked call is treated as abandoned
+// once its marker is older than the send bound (its sender is bounded by
+// it); operator-pending UNKNOWN calls are asked about at ResolveInterval.
 func (c *Calls) Reconcile(ctx context.Context) (int, error) {
-	rows, err := c.store.Queries().ListOpenToolRequests(ctx, sqlc.ListOpenToolRequestsParams{Limit: c.opts.ReconcileBatch, AgeSeconds: c.opts.ReconcileAge.Seconds()})
-	if err != nil {
-		return 0, err
-	}
 	q := c.store.Queries()
-	for _, r := range rows {
-		call := postgres.CallFromRow(r)
-		switch call.State {
-		case domain.CallAccepted:
-			c.admit(ctx, call)
-		case domain.CallAdmitted:
-			c.cancel(ctx, call, domain.CallNotSent)
-		case domain.CallSent:
-			code := domain.CallOutcomeUnknown
-			if n, err := q.SetToolRequestOutcome(ctx, sqlc.SetToolRequestOutcomeParams{CallID: call.CallID, State: string(domain.CallUnknown), FailureCode: &code,
-				Expected: []string{string(domain.CallSent)}}); err == nil && n == 1 {
-				c.count(domain.CallUnknown)
-				if call, err = c.load(ctx, q, call.CallID); err == nil {
-					c.observe(ctx, call)
-				}
-			}
-		case domain.CallUnknown:
-			if call.ObservedAt == nil {
+	sentAge := c.opts.SendTimeout + 5*time.Second
+	if c.opts.ReconcileAge < sentAge {
+		sentAge = c.opts.ReconcileAge
+	}
+	seen := map[string]struct{}{}
+	total := 0
+	after := sqlc.ListOpenToolRequestsParams{Limit: c.opts.ReconcileBatch, AgeSeconds: c.opts.ReconcileAge.Seconds(), SentAgeSeconds: sentAge.Seconds(),
+		AfterAt: pgtype.Timestamptz{Time: time.Time{}, Valid: true}, AfterID: ""}
+	for {
+		if ctx.Err() != nil {
+			return total, ctx.Err()
+		}
+		rows, err := q.ListOpenToolRequests(ctx, after)
+		if err != nil {
+			return total, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		total += len(rows)
+		last := rows[len(rows)-1]
+		after.AfterAt, after.AfterID = last.UpdatedAt, last.CallID
+		for _, r := range rows {
+			call := postgres.CallFromRow(r)
+			seen[call.CallID] = struct{}{}
+			c.reconcileOne(ctx, q, call)
+		}
+		if int32(len(rows)) < c.opts.ReconcileBatch {
+			break
+		}
+	}
+	c.resolveMu.Lock()
+	for id := range c.nextResolve {
+		if _, ok := seen[id]; !ok {
+			delete(c.nextResolve, id)
+		}
+	}
+	c.resolveMu.Unlock()
+	return total, nil
+}
+
+func (c *Calls) reconcileOne(ctx context.Context, q *sqlc.Queries, call domain.Call) {
+	switch call.State {
+	case domain.CallAccepted:
+		c.admit(ctx, call)
+	case domain.CallAdmitted:
+		c.cancel(ctx, call, domain.CallNotSent)
+	case domain.CallSent:
+		code := domain.CallOutcomeUnknown
+		if n, err := q.SetToolRequestOutcome(ctx, sqlc.SetToolRequestOutcomeParams{CallID: call.CallID, State: string(domain.CallUnknown), FailureCode: &code,
+			Expected: []string{string(domain.CallSent)}}); err == nil && n == 1 {
+			c.count(domain.CallUnknown)
+			c.log.Warn("marked call without outcome beyond the send bound; recorded UNKNOWN", "callId", call.CallID, "serverId", call.ServerID)
+			if call, err = c.load(ctx, q, call.CallID); err == nil {
 				c.observe(ctx, call)
-				continue
 			}
+		}
+	case domain.CallUnknown:
+		if call.ObservedAt == nil {
+			c.observe(ctx, call)
+			return
+		}
+		if c.dueForResolve(call.CallID) {
 			c.resolve(ctx, call)
-		default:
+		}
+	default:
+		c.observe(ctx, call)
+	}
+}
+
+// dueForResolve reports whether an operator-pending UNKNOWN call is asked
+// about at Control in this pass, and schedules the next time.
+func (c *Calls) dueForResolve(callID string) bool {
+	if c.opts.ResolveInterval <= 0 {
+		return true
+	}
+	now := c.clock.Now()
+	c.resolveMu.Lock()
+	defer c.resolveMu.Unlock()
+	if next, ok := c.nextResolve[callID]; ok && now.Before(next) {
+		return false
+	}
+	c.nextResolve[callID] = now.Add(c.opts.ResolveInterval)
+	return true
+}
+
+// ReconcileCall is the operator path (`anvilkit-agent-mcp reconcile
+// <callId>`): the call is advanced now under its original identity, an
+// UNKNOWN call by Control's current record of its original dispatch —
+// which, once Control resolved that identity, clears the RECOVERY_RESTRICTED
+// hold on the server. It never sends.
+func (c *Calls) ReconcileCall(ctx context.Context, callID string) (domain.Call, error) {
+	q := c.store.Queries()
+	call, err := c.load(ctx, q, callID)
+	if err != nil {
+		return domain.Call{}, err
+	}
+	switch call.State {
+	case domain.CallUnknown:
+		if call.ObservedAt == nil {
+			c.observe(ctx, call)
+		}
+		c.resolve(ctx, call)
+	case domain.CallSent:
+		c.reconcileOne(ctx, q, call)
+	case domain.CallSucceeded, domain.CallFailed, domain.CallCanceled:
+		if call.ObservedAt == nil && call.DispatchID != "" {
 			c.observe(ctx, call)
 		}
 	}
-	return len(rows), nil
+	return c.load(ctx, q, callID)
 }
 
 // resolve reads Control's record of an UNKNOWN call's original dispatch.

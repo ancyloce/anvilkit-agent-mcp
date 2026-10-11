@@ -103,6 +103,8 @@ type fakeUpstream struct {
 	isError bool
 	onOpen  func()
 	targets []application.UpstreamTarget
+	// hold, when set, keeps a send in flight until it is closed (or ctx ends).
+	hold chan struct{}
 }
 
 func (u *fakeUpstream) Open(_ context.Context, t application.UpstreamTarget) (application.UpstreamSession, error) {
@@ -123,10 +125,20 @@ type fakeSession struct{ u *fakeUpstream }
 
 func (s *fakeSession) Close() {}
 
-func (s *fakeSession) Send(_ context.Context, method string, args []byte) (application.UpstreamReply, error) {
+func (s *fakeSession) Send(ctx context.Context, method string, args []byte) (application.UpstreamReply, error) {
+	s.u.mu.Lock()
+	s.u.sends[string(args)]++
+	hold := s.u.hold
+	s.u.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return application.UpstreamReply{}, &application.UnknownError{Code: domain.CallOutcomeUnknown, Err: ctx.Err()}
+		}
+	}
 	s.u.mu.Lock()
 	defer s.u.mu.Unlock()
-	s.u.sends[string(args)]++
 	native := []byte(`{"content":[{"type":"text","text":"ok"}]}`)
 	if s.u.sendErr != nil {
 		return application.UpstreamReply{Native: native}, s.u.sendErr
@@ -406,6 +418,123 @@ func TestCalls(t *testing.T) {
 		reconcile()
 		got, _ = calls.Get(ctx, agent, got.CallID)
 		require.Equal(t, domain.CallSucceeded, got.State, "resolved from Control's record of the original dispatch")
+	})
+
+	t.Run("P1.2: sixty unresolvable UNKNOWN rows do not starve the reconciler; a newly resolved row settles within two passes", func(t *testing.T) {
+		// Sixty operator-pending rows older than the batch (50), all unknown at
+		// Control (the fake answers "unknown" for dispatch ids it never issued);
+		// they belong to another tenant so the restriction they carry does not
+		// fall on tenant_a's server.
+		for i := 0; i < 60; i++ {
+			admin("INSERT INTO tool_requests (call_id, tenant_id, grant_id, grant_revision, server_id, descriptor_revision, method, argument_ref, argument_digest, operation_id, attempt_id, state, command_id, request_digest, deadline, instance_id, execution_epoch, arguments, descriptor_digest, protocol_version, transport, route, side_effecting, exposure_currency, exposure_amount, control_dispatch_id, failure_code, send_marker_at, observed_at, created_at, updated_at) "+
+				"VALUES ('call-stuck-%d', 'tenant_stuck', '%s', %d, '%s', %d, 'search_issues', 'inline', '%s', 'op_1', 'att_1', 'unknown', 'cmd-stuck-%d', '%s', now() + interval '1 hour', 'inst_1', 1, '{}', '%s', '%s', 'streamable-http', 'go-sdk', false, 'USD', 0, 'dsp-stuck-%d', 'OUTCOME_UNKNOWN', now() - interval '10 minutes', now() - interval '10 minutes', now() - interval '10 minutes', now() - interval '10 minutes' + make_interval(secs => %d))",
+				i, g.GrantID, g.Revision, g.ServerID, g.DescriptorRevision, domain.DigestBytes([]byte("{}")), i, domain.DigestBytes([]byte(fmt.Sprintf("stuck-%d", i))), g.DescriptorDigest, g.ProtocolVersion, i, i)
+		}
+		// The row that will be resolved is the newest open one: a LIMIT over the
+		// oldest rows never reaches it.
+		up.set(func(u *fakeUpstream) {
+			u.sendErr = &application.UnknownError{Code: domain.CallOutcomeUnknown, Err: errors.New("connection reset")}
+		})
+		disp.set(func(f *fakeToolDispatch) { f.fault = "" })
+		c, r := call("create_issue", `{"title":"newest-unknown"}`)
+		got, _, err := calls.Create(ctx, c, agent, r)
+		require.NoError(t, err)
+		require.Equal(t, domain.CallUnknown, got.State)
+		up.set(func(u *fakeUpstream) { u.sendErr = nil })
+		disp.set(func(f *fakeToolDispatch) {
+			f.state[got.DispatchID], f.outcome[got.DispatchID] = "observed", application.OutcomeSucceeded
+		})
+		n1, err := calls.Reconcile(ctx)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, n1, 61, "the pass walks every open row, not one batch")
+		resolved, _ := calls.Get(ctx, agent, got.CallID)
+		if resolved.State != domain.CallSucceeded {
+			reconcile()
+			resolved, _ = calls.Get(ctx, agent, got.CallID)
+		}
+		require.Equal(t, domain.CallSucceeded, resolved.State, "resolved within two passes behind sixty unresolvable rows")
+		require.Equal(t, 1, up.count(`{"title":"newest-unknown"}`))
+		admin("DELETE FROM tool_requests WHERE call_id LIKE 'call-stuck-%%'")
+	})
+
+	t.Run("P1.2: the operator path advances one call now; a resolved identity at Control clears the restriction", func(t *testing.T) {
+		up.set(func(u *fakeUpstream) {
+			u.sendErr = &application.UnknownError{Code: domain.CallOutcomeUnknown, Err: errors.New("connection reset")}
+		})
+		c, r := call("create_issue", `{"title":"operator"}`)
+		got, _, err := calls.Create(ctx, c, agent, r)
+		require.NoError(t, err)
+		require.Equal(t, domain.CallUnknown, got.State)
+		up.set(func(u *fakeUpstream) { u.sendErr = nil })
+		c2, r2 := call("search_issues", `{"query":"restricted"}`)
+		_, _, err = calls.Create(ctx, c2, agent, r2)
+		require.ErrorContains(t, err, domain.CallRecoveryRestricted)
+		still, err := calls.ReconcileCall(ctx, got.CallID)
+		require.NoError(t, err)
+		require.Equal(t, domain.CallUnknown, still.State, "Control has not resolved the identity: the call stays unknown")
+		disp.set(func(f *fakeToolDispatch) { f.state[got.DispatchID] = "confirmed_not_sent" })
+		done, err := calls.ReconcileCall(ctx, got.CallID)
+		require.NoError(t, err)
+		require.Equal(t, domain.CallFailed, done.State)
+		require.Equal(t, "CONFIRMED_NOT_SENT", done.FailureCode)
+		c3, r3 := call("search_issues", `{"query":"unrestricted"}`)
+		ok, _, err := calls.Create(ctx, c3, agent, r3)
+		require.NoError(t, err)
+		require.Equal(t, domain.CallSucceeded, ok.State)
+		require.Equal(t, 1, up.count(`{"title":"operator"}`), "the operator path never sends")
+		_, err = calls.ReconcileCall(ctx, "call-nonexistent")
+		require.ErrorIs(t, err, domain.ErrNotFound)
+	})
+
+	t.Run("P1.2: a stop waits for in-flight sends within its bound and records UNKNOWN for what did not finish", func(t *testing.T) {
+		// A separate Calls so its closing state does not affect the other scenarios.
+		hold := make(chan struct{})
+		holdUp := &fakeUpstream{sends: map[string]int{}, hold: hold}
+		stopping := application.NewCalls(h.store, disp, map[string]application.Upstream{"go-sdk": holdUp}, tokens,
+			[]application.QualifiedRoute{{Resource: issuesURL, ProtocolVersion: protocol, Transport: "streamable-http", Route: "go-sdk"}},
+			application.CallOptions{SendTimeout: 30 * time.Second, Wait: 200 * time.Millisecond, ReconcileAge: 0, ReconcileBatch: 50}, h.clock, application.NewMetrics(prometheus.NewRegistry()), log)
+		c, _, err := stopping.Create(ctx, h.cmd(agent), agent, domain.CallRequest{GrantID: g.GrantID, GrantRevision: g.Revision, Method: "search_issues", ArgumentRef: "inline",
+			ArgumentDigest: domain.DigestBytes([]byte(`{"query":"in-flight"}`)), Arguments: []byte(`{"query":"in-flight"}`), OperationID: "op_1", AttemptID: "att_1", InstanceID: "inst_1", ExecutionEpoch: 1, Deadline: time.Now().Add(time.Hour)})
+		require.NoError(t, err)
+		require.Equal(t, domain.CallSent, c.State, "the send is in flight when the wait returns")
+		// The send finishes within the stop bound: a definite outcome.
+		go func() { time.Sleep(300 * time.Millisecond); close(hold) }()
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		recorded := stopping.Shutdown(stopCtx)
+		cancel()
+		require.Zero(t, recorded)
+		finished, _ := stopping.Get(ctx, agent, c.CallID)
+		require.Equal(t, domain.CallSucceeded, finished.State)
+		_, _, err = stopping.Create(ctx, h.cmd(agent), agent, domain.CallRequest{GrantID: g.GrantID, GrantRevision: g.Revision, Method: "search_issues", ArgumentRef: "inline",
+			ArgumentDigest: domain.DigestBytes([]byte(`{"query":"late"}`)), Arguments: []byte(`{"query":"late"}`), OperationID: "op_1", AttemptID: "att_1", InstanceID: "inst_1", ExecutionEpoch: 1, Deadline: time.Now().Add(time.Hour)})
+		require.ErrorIs(t, err, application.ErrShuttingDown, "a stopping process admits nothing")
+
+		// A send still running at the bound is recorded UNKNOWN before the process exits.
+		hold2 := make(chan struct{})
+		holdUp2 := &fakeUpstream{sends: map[string]int{}, hold: hold2}
+		stopping2 := application.NewCalls(h.store, disp, map[string]application.Upstream{"go-sdk": holdUp2}, tokens,
+			[]application.QualifiedRoute{{Resource: issuesURL, ProtocolVersion: protocol, Transport: "streamable-http", Route: "go-sdk"}},
+			application.CallOptions{SendTimeout: 30 * time.Second, Wait: 200 * time.Millisecond, ReconcileAge: 0, ReconcileBatch: 50}, h.clock, application.NewMetrics(prometheus.NewRegistry()), log)
+		c2, _, err := stopping2.Create(ctx, h.cmd(agent), agent, domain.CallRequest{GrantID: g.GrantID, GrantRevision: g.Revision, Method: "create_issue", ArgumentRef: "inline",
+			ArgumentDigest: domain.DigestBytes([]byte(`{"title":"at-the-bound"}`)), Arguments: []byte(`{"title":"at-the-bound"}`), OperationID: "op_1", AttemptID: "att_1", InstanceID: "inst_1", ExecutionEpoch: 1, Deadline: time.Now().Add(time.Hour)})
+		require.NoError(t, err)
+		require.Equal(t, domain.CallSent, c2.State)
+		stopCtx, cancel = context.WithTimeout(ctx, 300*time.Millisecond)
+		recorded = stopping2.Shutdown(stopCtx)
+		cancel()
+		require.Equal(t, 1, recorded)
+		unknown, _ := stopping2.Get(ctx, agent, c2.CallID)
+		require.Equal(t, domain.CallUnknown, unknown.State)
+		require.NotNil(t, unknown.ObservedAt, "the UNKNOWN is observed at Control synchronously")
+		require.Equal(t, []string{application.OutcomeUnknown}, disp.observed[c2.DispatchID])
+		close(hold2)
+		time.Sleep(200 * time.Millisecond) // the late sender finds its record no longer 'sent' and records nothing
+		late, _ := stopping2.Get(ctx, agent, c2.CallID)
+		require.Equal(t, domain.CallUnknown, late.State, "a late outcome never overwrites the recorded UNKNOWN")
+		require.Equal(t, 1, holdUp2.count(`{"title":"at-the-bound"}`))
+		disp.set(func(f *fakeToolDispatch) { f.state[c2.DispatchID] = "confirmed_not_sent" })
+		_, err = calls.ReconcileCall(ctx, c2.CallID)
+		require.NoError(t, err)
 	})
 
 	t.Run("a revocation committed between admission and the marker cancels the send", func(t *testing.T) {
