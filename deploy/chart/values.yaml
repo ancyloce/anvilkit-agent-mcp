@@ -241,9 +241,13 @@ probes:
     periodSeconds: 10
     failureThreshold: 3
 
-# Derived from the drains: the gRPC drain, the loops and the generation
-# retire are bounded by config; the grace period must exceed their sum.
-terminationGracePeriodSeconds: 90
+# Derived from the drains, each bounded by config: the gRPC drain
+# (grpc.shutdown_timeout, 20s), the wait for detached tool sends
+# (calls.send_timeout, 60s; a send still running at that bound is recorded
+# UNKNOWN before exit, P1.2), the loops and the generation retire
+# (reload.drain_limit, 30s), plus the health stop. The grace period must
+# exceed their sum; change it with any of those values.
+terminationGracePeriodSeconds: 130
 
 podSecurityContext:
   runAsNonRoot: true
