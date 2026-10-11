@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -25,15 +26,23 @@ import (
 // session is opened per call and never reused, so a connection never
 // carries another call's permission.
 type Route struct {
-	client  *http.Client
-	version string
+	client   *http.Client
+	version  string
+	maxBytes int64
 }
 
 // SDKRoute is the route's name in the qualification list.
 const SDKRoute = "go-sdk"
 
-func NewRoute(client *http.Client, version string) *Route {
-	return &Route{client: client, version: version}
+// NewRoute builds the route; maxBytes bounds the normalized result and the
+// native evidence that may be recorded for a call (the result column
+// bound). A response the server delivered beyond it is a definite failure
+// (RESULT_TOO_LARGE), never an unknown outcome.
+func NewRoute(client *http.Client, version string, maxBytes int64) *Route {
+	if maxBytes <= 0 {
+		maxBytes = 1 << 20
+	}
+	return &Route{client: client, version: version, maxBytes: maxBytes}
 }
 
 // Open connects, checks the negotiated protocol version and compares the
@@ -47,6 +56,11 @@ func (r *Route) Open(ctx context.Context, t application.UpstreamTarget) (applica
 	// The token's audience is the resource; it goes to that origin only.
 	origin := u.Scheme + "://" + u.Host
 	httpClient := WithBearer(r.client, origin, t.Token)
+	// The SDK reports a body cut by the bound as a generic transport failure;
+	// the session's own transport records the fact (a response whose headers
+	// arrived and whose body exceeded the bound) so Send can classify it.
+	rec := &overflowRecorder{base: httpClient.Transport}
+	httpClient.Transport = rec
 	client := mcp.NewClient(&mcp.Implementation{Name: "anvilkit-agent-mcp", Version: r.version}, &mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{}})
 	transport := &mcp.StreamableClientTransport{Endpoint: t.Resource, HTTPClient: httpClient, MaxRetries: -1, DisableStandaloneSSE: true}
 	cs, err := client.Connect(ctx, transport, &mcp.ClientSessionOptions{ProtocolVersion: t.ProtocolVersion})
@@ -81,8 +95,40 @@ func (r *Route) Open(ctx context.Context, t application.UpstreamTarget) (applica
 	if err != nil || digest != t.InputSchemaDigest {
 		return fail(domain.CallSchemaDrift, fmt.Errorf("live input schema of %s is %s, the reviewed revision has %s", t.Method, digest, t.InputSchemaDigest))
 	}
-	return &session{cs: cs}, nil
+	// Qualification is over: what the recorder sees from here on is the one send.
+	rec.overflow.Store(false)
+	return &session{cs: cs, maxBytes: r.maxBytes, rec: rec}, nil
 }
+
+// overflowRecorder notes a response body that exceeded the client's bound.
+type overflowRecorder struct {
+	base     http.RoundTripper
+	overflow atomic.Bool
+}
+
+func (o *overflowRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := o.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = &overflowBody{rc: resp.Body, rec: o}
+	return resp, nil
+}
+
+type overflowBody struct {
+	rc  io.ReadCloser
+	rec *overflowRecorder
+}
+
+func (b *overflowBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if errors.Is(err, ErrBodyTooLarge) {
+		b.rec.overflow.Store(true)
+	}
+	return n, err
+}
+
+func (b *overflowBody) Close() error { return b.rc.Close() }
 
 func qualify(code string, err error) error {
 	if errors.Is(err, ErrEgress) {
@@ -91,14 +137,22 @@ func qualify(code string, err error) error {
 	return &application.NotSentError{Code: code, Err: err}
 }
 
-type session struct{ cs *mcp.ClientSession }
+type session struct {
+	cs       *mcp.ClientSession
+	maxBytes int64
+	rec      *overflowRecorder
+}
 
 func (s *session) Close() { _ = s.cs.Close() }
 
 // Send makes the one tools/call of the call. A JSON-RPC error answered by
-// the server is a definite refusal; anything else that is not a result
-// (transport failure, timeout, oversized or malformed response) leaves the
-// outcome unknown.
+// the server is a definite refusal. A response the server delivered but
+// that cannot be kept — its body exceeded the bound after its headers
+// arrived, or its normalized or native form exceeds the result bound after
+// JSON re-encoding — is a definite failure (RESULT_TOO_LARGE) with usage:
+// the server did its work and answered; only the answer is unusable. What
+// never produced a response (transport failure, timeout, a body cut before
+// its end) leaves the outcome unknown.
 func (s *session) Send(ctx context.Context, method string, args []byte) (application.UpstreamReply, error) {
 	res, err := s.cs.CallTool(ctx, &mcp.CallToolParams{Name: method, Arguments: json.RawMessage(args)})
 	if err != nil {
@@ -107,21 +161,40 @@ func (s *session) Send(ctx context.Context, method string, args []byte) (applica
 			native, _ := json.Marshal(map[string]any{"error": map[string]any{"code": werr.Code, "message": bounded(werr.Message, 1024)}})
 			return application.UpstreamReply{Native: native}, &application.AnsweredError{Code: domain.CallProtocolError, Err: err}
 		}
-		code := domain.CallOutcomeUnknown
-		if errors.Is(err, ErrBodyTooLarge) {
-			code = domain.CallResultTooLarge
+		if errors.Is(err, ErrBodyTooLarge) || s.rec.overflow.Load() {
+			// The bound is enforced on a body whose headers arrived: the
+			// server answered; the answer is too large to be kept.
+			native, _ := json.Marshal(map[string]any{"truncated": true, "reason": "response body beyond the bound", "boundBytes": s.maxBytes})
+			return application.UpstreamReply{Native: native}, &application.AnsweredError{Code: domain.CallResultTooLarge, Err: err}
 		}
-		return application.UpstreamReply{}, &application.UnknownError{Code: code, Err: err}
+		return application.UpstreamReply{}, &application.UnknownError{Code: domain.CallOutcomeUnknown, Err: err}
 	}
 	native, err := json.Marshal(res)
 	if err != nil {
-		return application.UpstreamReply{}, &application.UnknownError{Code: domain.CallOutcomeUnknown, Err: err}
+		// A decoded result that cannot be re-encoded: the server answered; the answer is unusable.
+		return application.UpstreamReply{Native: []byte(`{"truncated":true,"reason":"native result not encodable"}`)}, &application.AnsweredError{Code: domain.CallProtocolError, Err: err}
 	}
 	result, err := Normalize(res)
 	if err != nil {
-		return application.UpstreamReply{Native: native}, &application.UnknownError{Code: domain.CallOutcomeUnknown, Err: err}
+		return application.UpstreamReply{Native: summarize(native, s.maxBytes)}, &application.AnsweredError{Code: domain.CallProtocolError, Err: err}
+	}
+	if int64(len(result)) > s.maxBytes || int64(len(native)) > s.maxBytes {
+		// JSON re-encoding (escaping, the normalized wrapper) can grow a
+		// response the wire bound admitted beyond what the record may hold.
+		summary, _ := json.Marshal(map[string]any{"truncated": true, "reason": "result beyond the bound after re-encoding", "boundBytes": s.maxBytes,
+			"nativeBytes": len(native), "resultBytes": len(result), "nativeDigest": domain.DigestBytes(native)})
+		return application.UpstreamReply{Native: summary}, &application.AnsweredError{Code: domain.CallResultTooLarge, Err: fmt.Errorf("%w: result %d bytes, native %d bytes, bound %d", ErrBodyTooLarge, len(result), len(native), s.maxBytes)}
 	}
 	return application.UpstreamReply{Result: result, Native: native, IsError: res.IsError}, nil
+}
+
+// summarize keeps native evidence that fits the bound, else its size and digest.
+func summarize(native []byte, max int64) []byte {
+	if int64(len(native)) <= max {
+		return native
+	}
+	out, _ := json.Marshal(map[string]any{"truncated": true, "nativeBytes": len(native), "nativeDigest": domain.DigestBytes(native)})
+	return out
 }
 
 // localCodes are the JSON-RPC codes the SDK builds itself for failures of

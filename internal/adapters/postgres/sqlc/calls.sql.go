@@ -297,18 +297,34 @@ func (q *Queries) InsertToolRequest(ctx context.Context, arg InsertToolRequestPa
 
 const listOpenToolRequests = `-- name: ListOpenToolRequests :many
 SELECT call_id, tenant_id, grant_id, grant_revision, server_id, descriptor_revision, method, argument_ref, argument_digest, operation_id, attempt_id, state, control_dispatch_id, result_ref, result_digest, failure_code, command_id, request_digest, deadline, created_at, updated_at, instance_id, execution_epoch, arguments, descriptor_digest, protocol_version, transport, route, side_effecting, exposure_currency, exposure_amount, send_marker_at, observed_at, observation_sequence, usage_units, native_evidence, result FROM tool_requests
-WHERE (state IN ('accepted', 'admitted', 'sent', 'unknown') OR (observed_at IS NULL AND control_dispatch_id IS NOT NULL AND state IN ('succeeded', 'failed', 'canceled')))
-  AND updated_at < now() - make_interval(secs => $2::float8)
-ORDER BY updated_at LIMIT $1
+WHERE ((state IN ('accepted', 'admitted', 'unknown') OR (observed_at IS NULL AND control_dispatch_id IS NOT NULL AND state IN ('succeeded', 'failed', 'canceled')))
+        AND updated_at < now() - make_interval(secs => $2::float8)
+     OR (state = 'sent' AND send_marker_at < now() - make_interval(secs => $3::float8)))
+  AND (updated_at, call_id) > ($4::timestamptz, $5::text)
+ORDER BY updated_at, call_id LIMIT $1
 `
 
 type ListOpenToolRequestsParams struct {
-	Limit      int32
-	AgeSeconds float64
+	Limit          int32
+	AgeSeconds     float64
+	SentAgeSeconds float64
+	AfterAt        pgtype.Timestamptz
+	AfterID        string
 }
 
+// One page of the open calls, keyset-ordered by (updated_at, call_id) after
+// the cursor: a pass walks every open row in pages, so rows that cannot be
+// advanced (UNKNOWN until Control resolves them) never hide the rows behind
+// them. A marked call whose sender died is found by its marker age (the
+// send bound), every other open row by its age (reconcile_age).
 func (q *Queries) ListOpenToolRequests(ctx context.Context, arg ListOpenToolRequestsParams) ([]ToolRequest, error) {
-	rows, err := q.db.Query(ctx, listOpenToolRequests, arg.Limit, arg.AgeSeconds)
+	rows, err := q.db.Query(ctx, listOpenToolRequests,
+		arg.Limit,
+		arg.AgeSeconds,
+		arg.SentAgeSeconds,
+		arg.AfterAt,
+		arg.AfterID,
+	)
 	if err != nil {
 		return nil, err
 	}

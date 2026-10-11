@@ -3,6 +3,8 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -91,7 +93,7 @@ func TestRoute(t *testing.T) {
 	ctx := context.Background()
 	f := newUpstreamFixture(t, nil)
 	guard := Guard{Policy: application.NetworkPolicy{PrivateHosts: []string{"127.0.0.1"}}, Resolver: resolver(nil)}
-	route := NewRoute(guard.Client(64<<10, 10*time.Second), "test")
+	route := NewRoute(guard.Client(64<<10, 10*time.Second), "test", 1<<20)
 	raw, err := json.Marshal(searchSchema)
 	require.NoError(t, err)
 	digest, err := domain.CanonicalDigest(raw)
@@ -153,14 +155,77 @@ func TestRoute(t *testing.T) {
 		require.ErrorAs(t, err, &refused, "%v", err)
 	})
 
-	t.Run("an oversized result is unknown, not truncated into a success", func(t *testing.T) {
+	t.Run("an oversized result the server delivered is a definite failure (RESULT_TOO_LARGE), never a success and never unknown", func(t *testing.T) {
+		// The wire bound: the body exceeds the client's bound after its headers arrived.
 		s, err := route.Open(ctx, target("big"))
 		require.NoError(t, err)
-		_, err = s.Send(ctx, "big", []byte(`{"query":"x"}`))
+		reply, err := s.Send(ctx, "big", []byte(`{"query":"x"}`))
 		s.Close()
-		var unknown *application.UnknownError
-		require.ErrorAs(t, err, &unknown)
+		var answered *application.AnsweredError
+		require.ErrorAs(t, err, &answered)
+		require.Equal(t, domain.CallResultTooLarge, answered.Code)
+		require.Contains(t, string(reply.Native), `"truncated":true`)
+		require.Nil(t, reply.Result)
 		require.Equal(t, int32(1), f.count("big"))
+		// The record bound: a response the wire bound admits whose re-encoded
+		// forms exceed what the record may hold.
+		s, err = NewRoute(guard.Client(64<<10, 10*time.Second), "test", 64).Open(ctx, target("search_issues"))
+		require.NoError(t, err)
+		reply, err = s.Send(ctx, "search_issues", []byte(`{"query":"x"}`))
+		s.Close()
+		require.ErrorAs(t, err, &answered)
+		require.Equal(t, domain.CallResultTooLarge, answered.Code)
+		require.LessOrEqual(t, len(reply.Native), 1024)
+		require.Contains(t, string(reply.Native), `"resultBytes"`)
+	})
+
+	t.Run("the send route speaks HTTP/1.1 to an h2-capable TLS peer; a connection closed after the body is one receive, never a replay", func(t *testing.T) {
+		var receives atomic.Int32
+		var protos sync.Map
+		peer := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			protos.Store(r.Proto, true)
+			if r.URL.Path == "/close-after-body" {
+				receives.Add(1)
+				require.NotEmpty(t, body)
+				// The whole body is received, then the connection goes away
+				// without a response: the HTTP/1.1 shape of a stream refused
+				// or a GOAWAY after the write.
+				if h, ok := w.(http.Hijacker); ok {
+					if conn, _, err := h.Hijack(); err == nil {
+						conn.Close()
+						return
+					}
+				}
+				panic(http.ErrNotSupported)
+			}
+			_, _ = w.Write([]byte("ok"))
+		}))
+		peer.EnableHTTP2 = true
+		peer.StartTLS()
+		t.Cleanup(peer.Close)
+		pool := x509.NewCertPool()
+		pool.AddCert(peer.Certificate())
+		g := Guard{Policy: application.NetworkPolicy{PrivateHosts: []string{"127.0.0.1"}}, Resolver: resolver(nil), TLS: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+		c := g.Client(64<<10, 5*time.Second)
+		// A rewindable body (what the SDK builds): GetBody is set, so an HTTP/2
+		// transport would replay it on REFUSED_STREAM/GOAWAY.
+		req, err := http.NewRequest(http.MethodPost, peer.URL+"/", bytes.NewReader([]byte(`{"jsonrpc":"2.0"}`)))
+		require.NoError(t, err)
+		require.NotNil(t, req.GetBody)
+		resp, err := c.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		require.Equal(t, 1, resp.ProtoMajor, "HTTP/1.1 negotiated although the peer offers h2")
+		_, h2 := protos.Load("HTTP/2.0")
+		require.False(t, h2, "h2 never negotiated")
+		for i := 0; i < 3; i++ {
+			req, err = http.NewRequest(http.MethodPost, peer.URL+"/close-after-body", bytes.NewReader([]byte(`{"jsonrpc":"2.0","method":"tools/call"}`)))
+			require.NoError(t, err)
+			_, err = c.Do(req)
+			require.Error(t, err, "no response: the outcome is unknown, the request is not repeated")
+		}
+		require.Equal(t, int32(3), receives.Load(), "each admitted request reached the peer exactly once")
 	})
 
 	t.Run("malicious results stay data: links are never followed, binary is reduced to a digest", func(t *testing.T) {

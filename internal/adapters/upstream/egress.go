@@ -17,6 +17,7 @@ package upstream
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +38,9 @@ type Guard struct {
 	Policy   application.NetworkPolicy
 	Resolver application.Resolver
 	Dialer   *net.Dialer
+	// TLS is the client configuration of https hops (nil: the platform
+	// roots). It never enables HTTP/2: see Client.
+	TLS *tls.Config
 }
 
 // DialContext resolves the host, checks every address, dials the checked
@@ -84,11 +88,29 @@ func (g Guard) DialContext(ctx context.Context, network, addr string) (net.Conn,
 
 // Client builds the guarded HTTP client. maxBody bounds every response
 // body; timeout bounds every request.
+//
+// The client speaks HTTP/1.1 only (review finding B-18): Go's HTTP/2
+// transport re-sends a request whose body it has already written when the
+// peer answers REFUSED_STREAM or GOAWAY (the SDK builds tools/call with a
+// rewindable body, so GetBody is set and the retry is taken), which would
+// deliver one admitted tools/call several times. HTTP/1.1 keeps only the
+// "nothing written" retry: a request that reached the wire is never
+// repeated for a non-idempotent method. Hosts that require HTTP/2 are not
+// qualified on this route.
 func (g Guard) Client(maxBody int64, timeout time.Duration) *http.Client {
+	tlsCfg := g.TLS
+	if tlsCfg == nil {
+		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else {
+		tlsCfg = tlsCfg.Clone()
+	}
+	// No h2 in ALPN, no h2 upgrade: the transport cannot negotiate HTTP/2.
+	tlsCfg.NextProtos = []string{"http/1.1"}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &guardedTransport{guard: g, maxBody: maxBody, base: &http.Transport{
-			Proxy: nil, DialContext: g.DialContext, ForceAttemptHTTP2: true,
+			Proxy: nil, DialContext: g.DialContext, ForceAttemptHTTP2: false,
+			TLSClientConfig: tlsCfg, TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
 			MaxIdleConns: 16, IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
 			ResponseHeaderTimeout: timeout, MaxResponseHeaderBytes: 64 << 10,
 		}},

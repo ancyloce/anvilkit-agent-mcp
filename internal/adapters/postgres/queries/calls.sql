@@ -40,7 +40,14 @@ UPDATE tool_requests SET observed_at = now(), observation_sequence = observation
 WHERE call_id = $1 AND observation_sequence = $2;
 
 -- name: ListOpenToolRequests :many
+-- One page of the open calls, keyset-ordered by (updated_at, call_id) after
+-- the cursor: a pass walks every open row in pages, so rows that cannot be
+-- advanced (UNKNOWN until Control resolves them) never hide the rows behind
+-- them. A marked call whose sender died is found by its marker age (the
+-- send bound), every other open row by its age (reconcile_age).
 SELECT * FROM tool_requests
-WHERE (state IN ('accepted', 'admitted', 'sent', 'unknown') OR (observed_at IS NULL AND control_dispatch_id IS NOT NULL AND state IN ('succeeded', 'failed', 'canceled')))
-  AND updated_at < now() - make_interval(secs => sqlc.arg(age_seconds)::float8)
-ORDER BY updated_at LIMIT $1;
+WHERE ((state IN ('accepted', 'admitted', 'unknown') OR (observed_at IS NULL AND control_dispatch_id IS NOT NULL AND state IN ('succeeded', 'failed', 'canceled')))
+        AND updated_at < now() - make_interval(secs => sqlc.arg(age_seconds)::float8)
+     OR (state = 'sent' AND send_marker_at < now() - make_interval(secs => sqlc.arg(sent_age_seconds)::float8)))
+  AND (updated_at, call_id) > (sqlc.arg(after_at)::timestamptz, sqlc.arg(after_id)::text)
+ORDER BY updated_at, call_id LIMIT $1;
