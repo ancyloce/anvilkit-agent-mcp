@@ -39,6 +39,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "reconcile" {
+		if err := reconcile(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	app := fx.New(bootstrap.Module())
 	if err := app.Err(); err != nil {
 		fmt.Fprintln(os.Stderr, "mcp:", err)
@@ -60,6 +67,27 @@ func main() {
 		fmt.Fprintln(os.Stderr, "mcp stop:", err)
 		os.Exit(1)
 	}
+}
+
+// reconcile is the operator path of P1.2: `anvilkit-agent-mcp reconcile
+// <callId>` advances one call now under its original identity from
+// Control's record and prints the call's state. It runs with the service's
+// configuration and workload identity and never sends anything upstream.
+func reconcile(args []string) error {
+	if len(args) != 1 || args[0] == "" {
+		return fmt.Errorf("usage: reconcile <callId>")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	call, err := bootstrap.ReconcileCall(ctx, args[0])
+	if err != nil {
+		return err
+	}
+	out := map[string]any{"callId": call.CallID, "state": call.State, "failureCode": call.FailureCode, "dispatchId": call.DispatchID, "serverId": call.ServerID, "observed": call.ObservedAt != nil}
+	if call.State == domain.CallUnknown {
+		out["note"] = "Control has not resolved the original identity; the server stays RECOVERY_RESTRICTED"
+	}
+	return json.NewEncoder(os.Stdout).Encode(out)
 }
 
 func localCheck(args []string) error {
