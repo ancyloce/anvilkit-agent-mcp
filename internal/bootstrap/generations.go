@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -183,6 +186,17 @@ func (g *Generations) Reload(ctx context.Context) (changed bool, err error) {
 	if candidate.Inputs() == active.Inputs() {
 		return false, nil
 	}
+	// A generation owns its pool, forwarder and task bounds; every other
+	// section (reviewed hosts, qualified routes, credential bindings, the
+	// authorizer's role bindings, Control and ContextForge placements, the
+	// listeners and identity) is read once at start and would stay at its
+	// start value while the metrics named the new generation (review finding
+	// MCP-07). Such a candidate is rejected by name; the active generation
+	// stays and the operator rolls the Deployment.
+	if changed := nonReloadableChanges(active.Config, candidate.Config); len(changed) > 0 {
+		g.metrics.ConfigRejections.Inc()
+		return false, fmt.Errorf("generation %d rejected: NON_RELOADABLE_KEYS_CHANGED: %s (a restart applies them)", candidate.Number, strings.Join(changed, ", "))
+	}
 	rt, err := buildRuntime(ctx, candidate, g.metrics, g.log)
 	if err != nil {
 		g.metrics.ConfigRejections.Inc()
@@ -232,4 +246,33 @@ func configPath() string {
 		return p
 	}
 	return config.DefaultConfigFile
+}
+
+// reloadableSections are the top-level configuration sections a generation
+// swap applies without a restart: the pool (database), the forwarder
+// (outbox) and the task bounds (tasks); reload itself governs the watcher.
+var reloadableSections = map[string]bool{"Database": true, "Outbox": true, "Tasks": true, "Reload": true}
+
+// nonReloadableChanges names the top-level sections (by their configuration
+// key) that differ between the active and the candidate configuration and
+// that only a restart applies; empty when the candidate is reloadable.
+func nonReloadableChanges(active, candidate config.Config) []string {
+	a, c := reflect.ValueOf(active), reflect.ValueOf(candidate)
+	typ := a.Type()
+	var changed []string
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if reloadableSections[f.Name] {
+			continue
+		}
+		if !reflect.DeepEqual(a.Field(i).Interface(), c.Field(i).Interface()) {
+			key := f.Tag.Get("koanf")
+			if key == "" {
+				key = strings.ToLower(f.Name)
+			}
+			changed = append(changed, key)
+		}
+	}
+	sort.Strings(changed)
+	return changed
 }

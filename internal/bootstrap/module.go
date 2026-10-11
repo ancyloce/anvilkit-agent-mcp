@@ -88,9 +88,11 @@ func Module() fx.Option {
 				if len(routes) == 0 {
 					log.Warn("no qualified tool routes: every tool call is refused (calls.qualified_routes empty)")
 				}
-				ups := map[string]application.Upstream{upstream.SDKRoute: upstream.NewRoute(eg.client, version)}
+				ups := map[string]application.Upstream{upstream.SDKRoute: upstream.NewRoute(eg.client, version, c.MaxResponseBytes)}
 				return application.NewCalls(store, dispatch, ups, eg.authority, routes, application.CallOptions{
 					SendTimeout: c.SendTimeout, Wait: c.Wait, ReconcileAge: c.ReconcileAge, ReconcileBatch: 50,
+					// Operator-pending UNKNOWN calls are asked about at Control once per reconcile_age, not every pass.
+					ResolveInterval: c.ReconcileAge,
 				}, clock, metrics, log)
 			},
 			func(gen config.Generation, log *slog.Logger) (*workloadIdentity, error) {
@@ -382,6 +384,15 @@ func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations,
 			} else {
 				srv.Close()
 			}
+			// Detached tool sends of this process: admit no more, wait for them
+			// within the send bound, record UNKNOWN for what did not finish
+			// (the chart's grace period covers this bound; see values.yaml).
+			sendStop, cancelSendStop := context.WithTimeout(ctx, cfg.Calls.SendTimeout)
+			if n := calls.Shutdown(sendStop); n > 0 {
+				forced = true
+				log.Warn("stop: in-flight tool sends recorded UNKNOWN", "count", n)
+			}
+			cancelSendStop()
 			cancelLoops()
 			for _, done := range []chan struct{}{sweeperDone, watcherDone, barrierDone, callsDone} {
 				select {
