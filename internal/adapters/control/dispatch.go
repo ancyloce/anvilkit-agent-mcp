@@ -28,6 +28,7 @@ const Owner = "anvilkit-agent-mcp"
 type DispatchQuery struct {
 	conn    *grpc.ClientConn
 	client  controlv1.DispatchServiceClient
+	authz   controlv1.AuthorizationServiceClient
 	timeout time.Duration
 }
 
@@ -39,7 +40,23 @@ func Dial(address string, timeout time.Duration, transport grpc.DialOption) (*Di
 	if err != nil {
 		return nil, fmt.Errorf("control %s: %w", address, err)
 	}
-	return &DispatchQuery{conn: conn, client: controlv1.NewDispatchServiceClient(conn), timeout: timeout}, nil
+	return &DispatchQuery{conn: conn, client: controlv1.NewDispatchServiceClient(conn), authz: controlv1.NewAuthorizationServiceClient(conn), timeout: timeout}, nil
+}
+
+// CheckExecution asks Control's AuthorizationService (P2.1) whether the
+// caller may execute the resource; only DECISION_ALLOW allows.
+func (d *DispatchQuery) CheckExecution(ctx context.Context, scope application.Scope, resourceType, resourceID, action string) (application.ExecutionDecision, error) {
+	ctx, cancel := context.WithTimeout(ctx, d.timeout)
+	defer cancel()
+	resp, err := d.authz.CheckExecution(ctx, &controlv1.CheckExecutionRequest{Query: &controlv1.AuthorizationQuery{
+		Scope:        &controlv1.Scope{TenantId: scope.TenantID, ProjectId: scope.ProjectID, ActorId: scope.ActorID},
+		ResourceType: resourceType, ResourceId: resourceID, Action: action,
+	}})
+	if err != nil {
+		return application.ExecutionDecision{}, err
+	}
+	dec := resp.GetDecision()
+	return application.ExecutionDecision{Allowed: dec.GetDecision() == controlv1.Decision_DECISION_ALLOW, Revision: dec.GetRevision(), Reason: dec.GetReasonCode()}, nil
 }
 
 func (d *DispatchQuery) Close() error { return d.conn.Close() }
