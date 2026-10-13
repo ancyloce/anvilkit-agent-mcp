@@ -33,6 +33,22 @@ type fakeToolDispatch struct {
 	fault     string
 	denyCode  string
 	observeUp bool
+	// authz answers CheckExecution: "" allows, "deny" denies, "error" fails.
+	authz  string
+	checks int
+}
+
+func (f *fakeToolDispatch) CheckExecution(_ context.Context, scope application.Scope, resourceType, resourceID, action string) (application.ExecutionDecision, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checks++
+	switch f.authz {
+	case "deny":
+		return application.ExecutionDecision{Allowed: false, Revision: "rev-1", Reason: "NO_ENTITLEMENT"}, nil
+	case "error":
+		return application.ExecutionDecision{}, errors.New("AUTHORITY_UNAVAILABLE")
+	}
+	return application.ExecutionDecision{Allowed: true, Revision: "rev-1"}, nil
 }
 
 func newFakeToolDispatch() *fakeToolDispatch {
@@ -266,6 +282,26 @@ func TestCalls(t *testing.T) {
 		_, _, err := calls.Create(ctx, c, application.Scope{TenantID: "tenant_a", ProjectID: "proj_b", ActorID: "agent-1"}, r)
 		require.ErrorIs(t, err, domain.ErrNotFound, "another project's caller never sees the grant")
 		require.Equal(t, 0, up.count(`{"query":"refused"}`))
+	})
+
+	t.Run("P2.1: Control's commercial authorization refuses the call before anything is tracked", func(t *testing.T) {
+		for _, answer := range []string{"deny", "error"} {
+			disp.set(func(f *fakeToolDispatch) { f.authz = answer })
+			c, r := call("search_issues", `{"query":"commercial-`+answer+`"}`)
+			_, _, err := calls.Create(ctx, c, agent, r)
+			require.Error(t, err, answer)
+			if answer == "deny" {
+				require.ErrorIs(t, err, application.ErrForbidden)
+				require.ErrorContains(t, err, domain.CallAuthorizationDenied)
+			}
+			_, err = calls.Get(ctx, agent, "call-unknown")
+			require.ErrorIs(t, err, domain.ErrNotFound)
+			require.Equal(t, 0, up.count(`{"query":"commercial-`+answer+`"}`), "nothing reaches the tool")
+			var tracked int
+			require.NoError(t, h.store.Pool().QueryRow(ctx, "SELECT count(*) FROM tool_requests WHERE command_id = $1", c.CommandID).Scan(&tracked))
+			require.Zero(t, tracked, "no call is recorded")
+		}
+		disp.set(func(f *fakeToolDispatch) { f.authz = "" })
 	})
 
 	t.Run("a connection that is not qualified is never sent to; the permission is canceled", func(t *testing.T) {

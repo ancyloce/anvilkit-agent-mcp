@@ -76,11 +76,22 @@ const (
 
 // ToolDispatcher is Control's DispatchService for tool dispatches.
 type ToolDispatcher interface {
+	// CheckExecution asks Control's AuthorizationService whether the
+	// caller may execute the resource now (P2.1); an error establishes
+	// nothing and refuses the call.
+	CheckExecution(ctx context.Context, scope Scope, resourceType, resourceID, action string) (ExecutionDecision, error)
 	AdmitTool(ctx context.Context, req ToolAdmit) (ToolAdmission, error)
 	// ObserveTool reports an outcome under (dispatch, sequence); units is
 	// nil for UNKNOWN.
 	ObserveTool(ctx context.Context, dispatchID string, sequence uint64, outcome string, units *uint64, at time.Time) error
 	GetTool(ctx context.Context, tenantID, dispatchID string) (DispatchView, error)
+}
+
+// ExecutionDecision is Control's commercial authorization answer.
+type ExecutionDecision struct {
+	Allowed  bool
+	Revision string
+	Reason   string
 }
 
 // UpstreamTarget is what a send is qualified against.
@@ -276,6 +287,20 @@ func (c *Calls) Create(ctx context.Context, cmd Command, scope Scope, req domain
 		return domain.Call{}, false, err
 	}
 	callID := idOf("call-", cmd.TenantID, cmd.CommandID)
+	// Control's commercial authorization of the execution, outside every
+	// lock and before anything is recorded (P2.1): a denial or an
+	// unreachable decision refuses the call.
+	if gr, err := q.GetGrant(ctx, req.GrantID); err == nil && gr.TenantID == scope.TenantID {
+		decision, err := c.dispatch.CheckExecution(ctx, scope, "mcp-tool", gr.ServerID+"/"+req.Method, "execute")
+		if err != nil {
+			return domain.Call{}, false, fmt.Errorf("commercial authorization of %s/%s: %w", gr.ServerID, req.Method, err)
+		}
+		if !decision.Allowed {
+			return domain.Call{}, false, fmt.Errorf("%w: %s: %s (revision %s)", ErrForbidden, domain.CallAuthorizationDenied, decision.Reason, decision.Revision)
+		}
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return domain.Call{}, false, err
+	}
 	err := c.store.InTx(ctx, func(ctx context.Context, tx postgres.Tx) error {
 		gr, err := tx.Q.GetGrantForShare(ctx, req.GrantID)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && gr.TenantID != scope.TenantID) {
