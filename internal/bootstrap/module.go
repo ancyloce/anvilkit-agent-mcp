@@ -243,6 +243,9 @@ func loadCredentials(path string) ([]upstream.Credential, error) {
 // accepted calls stay accepted and nothing is ever sent.
 type noToolDispatch struct{}
 
+func (noToolDispatch) CheckExecution(context.Context, application.Scope, string, string, string) (application.ExecutionDecision, error) {
+	return application.ExecutionDecision{}, errNoControl
+}
 func (noToolDispatch) AdmitTool(context.Context, application.ToolAdmit) (application.ToolAdmission, error) {
 	return application.ToolAdmission{}, errNoControl
 }

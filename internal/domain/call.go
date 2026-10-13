@@ -31,6 +31,9 @@ const (
 // Failure codes of calls.
 const (
 	CallGrantNotExecutable  = "GRANT_NOT_EXECUTABLE"
+	// CallAuthorizationDenied: Control's commercial authorization of the
+	// caller's execution answered deny (P2.1).
+	CallAuthorizationDenied = "AUTHORIZATION_DENIED"
 	CallRecoveryRestricted  = "RECOVERY_RESTRICTED"
 	CallRouteUnqualified    = "PROFILE_UNQUALIFIED"
 	CallProtocolMismatch    = "PROTOCOL_MISMATCH"
