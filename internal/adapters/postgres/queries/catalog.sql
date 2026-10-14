@@ -27,8 +27,8 @@ SELECT * FROM descriptors WHERE server_id = $1 AND descriptor_digest = $2;
 -- name: InsertDescriptor :exec
 INSERT INTO descriptors (server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest,
     server_name, server_version, resources, prompts, resources_digest, prompts_digest, data_class, network_scope, licenses, issuer,
-    revision_evidence, connection_ref, discovered_by)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22);
+    revision_evidence, connection_ref, discovered_by, input_schemas)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23);
 
 -- name: UpdateDescriptorState :exec
 UPDATE descriptors SET state = $3, reviewer = COALESCE(sqlc.narg(reviewer), reviewer), review_id = COALESCE(sqlc.narg(review_id), review_id), updated_at = now()
@@ -99,3 +99,33 @@ SELECT grant_id FROM grants WHERE state = 'active' AND expires_at IS NOT NULL AN
 
 -- name: CountOpenToolRequests :one
 SELECT count(*)::bigint FROM tool_requests WHERE grant_id = $1 AND grant_revision = $2 AND state IN ('accepted', 'admitted', 'sent', 'unknown');
+
+-- P2.5: the catalog refresh.
+
+-- name: ListRefreshTargets :many
+-- Approved revisions an active, receipted, unexpired grant can call: one
+-- row per revision with the grant its refresh request is authorized by (the
+-- oldest such grant).
+SELECT DISTINCT ON (d.server_id, d.revision) d.server_id, d.revision, d.descriptor_digest, s.tenant_id, g.grant_id
+FROM descriptors d
+JOIN servers s ON s.server_id = d.server_id
+JOIN grants g ON g.server_id = d.server_id AND g.descriptor_revision = d.revision AND g.state = 'active'
+    AND g.control_receipt_id IS NOT NULL AND (g.expires_at IS NULL OR g.expires_at > sqlc.arg(now)::timestamptz)
+WHERE d.state = 'approved'
+ORDER BY d.server_id, d.revision, g.created_at, g.grant_id
+LIMIT sqlc.arg(max_targets);
+
+-- name: InsertRefresh :exec
+INSERT INTO catalog_refreshes (task_id, generation, worker_id, server_id, revision, reviewed_digest, live_digest, drift, drift_reason, result_ref, result_digest)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (task_id, generation) DO NOTHING;
+
+-- name: GetRefresh :one
+SELECT * FROM catalog_refreshes WHERE task_id = $1 AND generation = $2;
+
+-- name: NextEventRevision :one
+-- P2.8 (MCP-14): the next aggregateRevision of the aggregate's events,
+-- taken on the event's own transaction.
+INSERT INTO event_revisions (aggregate_type, aggregate_id, revision) VALUES ($1, $2, 1)
+ON CONFLICT (aggregate_type, aggregate_id) DO UPDATE SET revision = event_revisions.revision + 1
+RETURNING revision;

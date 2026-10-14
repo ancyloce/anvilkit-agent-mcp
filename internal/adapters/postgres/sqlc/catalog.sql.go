@@ -52,7 +52,7 @@ func (q *Queries) GetCatalogCommand(ctx context.Context, arg GetCatalogCommandPa
 }
 
 const getDescriptor = `-- name: GetDescriptor :one
-SELECT server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest, created_at, updated_at, server_name, server_version, resources, prompts, resources_digest, prompts_digest, data_class, network_scope, licenses, issuer, revision_evidence, connection_ref, discovered_by, reviewer, review_id FROM descriptors WHERE server_id = $1 AND revision = $2
+SELECT server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest, created_at, updated_at, server_name, server_version, resources, prompts, resources_digest, prompts_digest, data_class, network_scope, licenses, issuer, revision_evidence, connection_ref, discovered_by, reviewer, review_id, input_schemas FROM descriptors WHERE server_id = $1 AND revision = $2
 `
 
 type GetDescriptorParams struct {
@@ -90,12 +90,13 @@ func (q *Queries) GetDescriptor(ctx context.Context, arg GetDescriptorParams) (D
 		&i.DiscoveredBy,
 		&i.Reviewer,
 		&i.ReviewID,
+		&i.InputSchemas,
 	)
 	return i, err
 }
 
 const getDescriptorByDigest = `-- name: GetDescriptorByDigest :one
-SELECT server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest, created_at, updated_at, server_name, server_version, resources, prompts, resources_digest, prompts_digest, data_class, network_scope, licenses, issuer, revision_evidence, connection_ref, discovered_by, reviewer, review_id FROM descriptors WHERE server_id = $1 AND descriptor_digest = $2
+SELECT server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest, created_at, updated_at, server_name, server_version, resources, prompts, resources_digest, prompts_digest, data_class, network_scope, licenses, issuer, revision_evidence, connection_ref, discovered_by, reviewer, review_id, input_schemas FROM descriptors WHERE server_id = $1 AND descriptor_digest = $2
 `
 
 type GetDescriptorByDigestParams struct {
@@ -133,12 +134,13 @@ func (q *Queries) GetDescriptorByDigest(ctx context.Context, arg GetDescriptorBy
 		&i.DiscoveredBy,
 		&i.Reviewer,
 		&i.ReviewID,
+		&i.InputSchemas,
 	)
 	return i, err
 }
 
 const getDescriptorForUpdate = `-- name: GetDescriptorForUpdate :one
-SELECT server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest, created_at, updated_at, server_name, server_version, resources, prompts, resources_digest, prompts_digest, data_class, network_scope, licenses, issuer, revision_evidence, connection_ref, discovered_by, reviewer, review_id FROM descriptors WHERE server_id = $1 AND revision = $2 FOR UPDATE
+SELECT server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest, created_at, updated_at, server_name, server_version, resources, prompts, resources_digest, prompts_digest, data_class, network_scope, licenses, issuer, revision_evidence, connection_ref, discovered_by, reviewer, review_id, input_schemas FROM descriptors WHERE server_id = $1 AND revision = $2 FOR UPDATE
 `
 
 type GetDescriptorForUpdateParams struct {
@@ -176,6 +178,7 @@ func (q *Queries) GetDescriptorForUpdate(ctx context.Context, arg GetDescriptorF
 		&i.DiscoveredBy,
 		&i.Reviewer,
 		&i.ReviewID,
+		&i.InputSchemas,
 	)
 	return i, err
 }
@@ -361,6 +364,35 @@ func (q *Queries) GetGrantForUpdate(ctx context.Context, grantID string) (Grant,
 	return i, err
 }
 
+const getRefresh = `-- name: GetRefresh :one
+SELECT task_id, generation, worker_id, server_id, revision, reviewed_digest, live_digest, drift, drift_reason, result_ref, result_digest, refreshed_at FROM catalog_refreshes WHERE task_id = $1 AND generation = $2
+`
+
+type GetRefreshParams struct {
+	TaskID     string
+	Generation int64
+}
+
+func (q *Queries) GetRefresh(ctx context.Context, arg GetRefreshParams) (CatalogRefresh, error) {
+	row := q.db.QueryRow(ctx, getRefresh, arg.TaskID, arg.Generation)
+	var i CatalogRefresh
+	err := row.Scan(
+		&i.TaskID,
+		&i.Generation,
+		&i.WorkerID,
+		&i.ServerID,
+		&i.Revision,
+		&i.ReviewedDigest,
+		&i.LiveDigest,
+		&i.Drift,
+		&i.DriftReason,
+		&i.ResultRef,
+		&i.ResultDigest,
+		&i.RefreshedAt,
+	)
+	return i, err
+}
+
 const getServer = `-- name: GetServer :one
 SELECT server_id, tenant_id, canonical_resource, transport, current_revision, created_at FROM servers WHERE server_id = $1
 `
@@ -435,8 +467,8 @@ func (q *Queries) InsertCatalogCommand(ctx context.Context, arg InsertCatalogCom
 const insertDescriptor = `-- name: InsertDescriptor :exec
 INSERT INTO descriptors (server_id, revision, protocol_version, provenance, descriptor_digest, tools, state, command_id, request_digest,
     server_name, server_version, resources, prompts, resources_digest, prompts_digest, data_class, network_scope, licenses, issuer,
-    revision_evidence, connection_ref, discovered_by)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+    revision_evidence, connection_ref, discovered_by, input_schemas)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 `
 
 type InsertDescriptorParams struct {
@@ -462,6 +494,7 @@ type InsertDescriptorParams struct {
 	RevisionEvidence string
 	ConnectionRef    string
 	DiscoveredBy     string
+	InputSchemas     []byte
 }
 
 func (q *Queries) InsertDescriptor(ctx context.Context, arg InsertDescriptorParams) error {
@@ -488,6 +521,7 @@ func (q *Queries) InsertDescriptor(ctx context.Context, arg InsertDescriptorPara
 		arg.RevisionEvidence,
 		arg.ConnectionRef,
 		arg.DiscoveredBy,
+		arg.InputSchemas,
 	)
 	return err
 }
@@ -594,6 +628,43 @@ func (q *Queries) InsertGrantDecision(ctx context.Context, arg InsertGrantDecisi
 	return err
 }
 
+const insertRefresh = `-- name: InsertRefresh :exec
+INSERT INTO catalog_refreshes (task_id, generation, worker_id, server_id, revision, reviewed_digest, live_digest, drift, drift_reason, result_ref, result_digest)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (task_id, generation) DO NOTHING
+`
+
+type InsertRefreshParams struct {
+	TaskID         string
+	Generation     int64
+	WorkerID       string
+	ServerID       string
+	Revision       int64
+	ReviewedDigest string
+	LiveDigest     *string
+	Drift          bool
+	DriftReason    *string
+	ResultRef      string
+	ResultDigest   string
+}
+
+func (q *Queries) InsertRefresh(ctx context.Context, arg InsertRefreshParams) error {
+	_, err := q.db.Exec(ctx, insertRefresh,
+		arg.TaskID,
+		arg.Generation,
+		arg.WorkerID,
+		arg.ServerID,
+		arg.Revision,
+		arg.ReviewedDigest,
+		arg.LiveDigest,
+		arg.Drift,
+		arg.DriftReason,
+		arg.ResultRef,
+		arg.ResultDigest,
+	)
+	return err
+}
+
 const insertReview = `-- name: InsertReview :exec
 INSERT INTO reviews (review_id, server_id, revision, descriptor_digest, reviewer, decision, reason_code, command_id, request_digest, tenant_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -650,7 +721,7 @@ func (q *Queries) InsertServer(ctx context.Context, arg InsertServerParams) erro
 }
 
 const listDescriptors = `-- name: ListDescriptors :many
-SELECT d.server_id, d.revision, d.protocol_version, d.provenance, d.descriptor_digest, d.tools, d.state, d.command_id, d.request_digest, d.created_at, d.updated_at, d.server_name, d.server_version, d.resources, d.prompts, d.resources_digest, d.prompts_digest, d.data_class, d.network_scope, d.licenses, d.issuer, d.revision_evidence, d.connection_ref, d.discovered_by, d.reviewer, d.review_id FROM descriptors d JOIN servers s ON s.server_id = d.server_id
+SELECT d.server_id, d.revision, d.protocol_version, d.provenance, d.descriptor_digest, d.tools, d.state, d.command_id, d.request_digest, d.created_at, d.updated_at, d.server_name, d.server_version, d.resources, d.prompts, d.resources_digest, d.prompts_digest, d.data_class, d.network_scope, d.licenses, d.issuer, d.revision_evidence, d.connection_ref, d.discovered_by, d.reviewer, d.review_id, d.input_schemas FROM descriptors d JOIN servers s ON s.server_id = d.server_id
 WHERE s.tenant_id = $1 AND ($2::text = '' OR d.state = $2::text)
   AND ($3::boolean OR d.state IN ('approved', 'disabled'))
   AND (d.server_id, d.revision) > ($4::text, $5::bigint)
@@ -709,6 +780,7 @@ func (q *Queries) ListDescriptors(ctx context.Context, arg ListDescriptorsParams
 			&i.DiscoveredBy,
 			&i.Reviewer,
 			&i.ReviewID,
+			&i.InputSchemas,
 		); err != nil {
 			return nil, err
 		}
@@ -892,6 +964,81 @@ func (q *Queries) ListOpenBarriers(ctx context.Context, arg ListOpenBarriersPara
 		return nil, err
 	}
 	return items, nil
+}
+
+const listRefreshTargets = `-- name: ListRefreshTargets :many
+
+SELECT DISTINCT ON (d.server_id, d.revision) d.server_id, d.revision, d.descriptor_digest, s.tenant_id, g.grant_id
+FROM descriptors d
+JOIN servers s ON s.server_id = d.server_id
+JOIN grants g ON g.server_id = d.server_id AND g.descriptor_revision = d.revision AND g.state = 'active'
+    AND g.control_receipt_id IS NOT NULL AND (g.expires_at IS NULL OR g.expires_at > $1::timestamptz)
+WHERE d.state = 'approved'
+ORDER BY d.server_id, d.revision, g.created_at, g.grant_id
+LIMIT $2
+`
+
+type ListRefreshTargetsParams struct {
+	Now        pgtype.Timestamptz
+	MaxTargets int32
+}
+
+type ListRefreshTargetsRow struct {
+	ServerID         string
+	Revision         int64
+	DescriptorDigest string
+	TenantID         string
+	GrantID          string
+}
+
+// P2.5: the catalog refresh.
+// Approved revisions an active, receipted, unexpired grant can call: one
+// row per revision with the grant its refresh request is authorized by (the
+// oldest such grant).
+func (q *Queries) ListRefreshTargets(ctx context.Context, arg ListRefreshTargetsParams) ([]ListRefreshTargetsRow, error) {
+	rows, err := q.db.Query(ctx, listRefreshTargets, arg.Now, arg.MaxTargets)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRefreshTargetsRow{}
+	for rows.Next() {
+		var i ListRefreshTargetsRow
+		if err := rows.Scan(
+			&i.ServerID,
+			&i.Revision,
+			&i.DescriptorDigest,
+			&i.TenantID,
+			&i.GrantID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const nextEventRevision = `-- name: NextEventRevision :one
+INSERT INTO event_revisions (aggregate_type, aggregate_id, revision) VALUES ($1, $2, 1)
+ON CONFLICT (aggregate_type, aggregate_id) DO UPDATE SET revision = event_revisions.revision + 1
+RETURNING revision
+`
+
+type NextEventRevisionParams struct {
+	AggregateType string
+	AggregateID   string
+}
+
+// P2.8 (MCP-14): the next aggregateRevision of the aggregate's events,
+// taken on the event's own transaction.
+func (q *Queries) NextEventRevision(ctx context.Context, arg NextEventRevisionParams) (int64, error) {
+	row := q.db.QueryRow(ctx, nextEventRevision, arg.AggregateType, arg.AggregateID)
+	var revision int64
+	err := row.Scan(&revision)
+	return revision, err
 }
 
 const setServerRevision = `-- name: SetServerRevision :exec

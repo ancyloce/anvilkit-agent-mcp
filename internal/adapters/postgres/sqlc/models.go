@@ -45,6 +45,21 @@ type CatalogCommand struct {
 	CreatedAt     pgtype.Timestamptz
 }
 
+type CatalogRefresh struct {
+	TaskID         string
+	Generation     int64
+	WorkerID       string
+	ServerID       string
+	Revision       int64
+	ReviewedDigest string
+	LiveDigest     *string
+	Drift          bool
+	DriftReason    *string
+	ResultRef      string
+	ResultDigest   string
+	RefreshedAt    pgtype.Timestamptz
+}
+
 type Descriptor struct {
 	ServerID         string
 	Revision         int64
@@ -72,6 +87,13 @@ type Descriptor struct {
 	DiscoveredBy     string
 	Reviewer         *string
 	ReviewID         *string
+	InputSchemas     []byte
+}
+
+type EventRevision struct {
+	AggregateType string
+	AggregateID   string
+	Revision      int64
 }
 
 type Grant struct {

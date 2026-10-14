@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync/atomic"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -45,17 +46,29 @@ func NewRoute(client *http.Client, version string, maxBytes int64) *Route {
 	return &Route{client: client, version: version, maxBytes: maxBytes}
 }
 
-// Open connects, checks the negotiated protocol version and compares the
-// live input schema of the method with the reviewed descriptor's. Nothing
-// has been sent to the tool when Open returns.
+// Open connects, checks the negotiated protocol version and the reviewed
+// revision's lock (P2.5): the live server's name and version
+// (DESCRIPTOR_DRIFT), the method's input and output schemas (SCHEMA_DRIFT)
+// and its annotations (DESCRIPTOR_DRIFT), each recomputed from the live
+// session. Every hop of the session is held to the revision's network
+// scope (EGRESS_REFUSED before anything leaves). Nothing has been sent to
+// the tool when Open returns.
 func (r *Route) Open(ctx context.Context, t application.UpstreamTarget) (application.UpstreamSession, error) {
 	u, err := url.Parse(t.Resource)
 	if err != nil {
 		return nil, qualify(domain.CallEgressRefused, err)
 	}
+	scope := t.NetworkScope
+	if len(scope) == 0 {
+		scope = []string{strings.ToLower(u.Hostname())}
+	}
+	if !application.HostInScope(u.Hostname(), scope) {
+		return nil, qualify(domain.CallEgressRefused, fmt.Errorf("%w: resource host %s is outside the revision's network scope", ErrEgress, u.Hostname()))
+	}
 	// The token's audience is the resource; it goes to that origin only.
 	origin := u.Scheme + "://" + u.Host
 	httpClient := WithBearer(r.client, origin, t.Token)
+	httpClient.Transport = &scoped{base: httpClient.Transport, scope: scope}
 	// The SDK reports a body cut by the bound as a generic transport failure;
 	// the session's own transport records the fact (a response whose headers
 	// arrived and whose body exceeded the bound) so Send can classify it.
@@ -71,8 +84,16 @@ func (r *Route) Open(ctx context.Context, t application.UpstreamTarget) (applica
 		cs.Close()
 		return nil, qualify(code, err)
 	}
-	if got := cs.InitializeResult().ProtocolVersion; got != t.ProtocolVersion {
+	initRes := cs.InitializeResult()
+	if got := initRes.ProtocolVersion; got != t.ProtocolVersion {
 		return fail(domain.CallProtocolMismatch, fmt.Errorf("negotiated protocol %s, the grant binds %s", got, t.ProtocolVersion))
+	}
+	var name, ver string
+	if initRes.ServerInfo != nil {
+		name, ver = initRes.ServerInfo.Name, initRes.ServerInfo.Version
+	}
+	if name != t.ServerName || ver != t.ServerVersion {
+		return fail(domain.CallDescriptorDrift, fmt.Errorf("live server is %s %s, the reviewed revision has %s %s", name, ver, t.ServerName, t.ServerVersion))
 	}
 	var tool *mcp.Tool
 	for tl, err := range cs.Tools(ctx, nil) {
@@ -87,17 +108,47 @@ func (r *Route) Open(ctx context.Context, t application.UpstreamTarget) (applica
 	if tool == nil {
 		return fail(domain.CallSchemaDrift, fmt.Errorf("the server no longer lists %s", t.Method))
 	}
-	raw, err := json.Marshal(tool.InputSchema)
-	if err != nil {
-		return fail(domain.CallSchemaDrift, err)
+	for _, s := range []struct {
+		what   string
+		value  any
+		digest string
+	}{{"input schema", tool.InputSchema, t.InputSchemaDigest}, {"output schema", tool.OutputSchema, t.OutputSchemaDigest}} {
+		raw, err := json.Marshal(s.value)
+		if err != nil {
+			return fail(domain.CallSchemaDrift, err)
+		}
+		digest, err := domain.CanonicalDigest(raw)
+		if err != nil || digest != s.digest {
+			return fail(domain.CallSchemaDrift, fmt.Errorf("live %s of %s is %s, the reviewed revision has %s", s.what, t.Method, digest, s.digest))
+		}
 	}
-	digest, err := domain.CanonicalDigest(raw)
-	if err != nil || digest != t.InputSchemaDigest {
-		return fail(domain.CallSchemaDrift, fmt.Errorf("live input schema of %s is %s, the reviewed revision has %s", t.Method, digest, t.InputSchemaDigest))
+	var ann []byte
+	if tool.Annotations != nil {
+		if ann, err = json.Marshal(tool.Annotations); err != nil {
+			return fail(domain.CallDescriptorDrift, err)
+		}
+	}
+	if digest, err := domain.AnnotationsDigest(ann); err != nil || digest != t.AnnotationsDigest {
+		return fail(domain.CallDescriptorDrift, fmt.Errorf("live annotations of %s are %s, the reviewed revision has %s", t.Method, digest, t.AnnotationsDigest))
 	}
 	// Qualification is over: what the recorder sees from here on is the one send.
 	rec.overflow.Store(false)
 	return &session{cs: cs, maxBytes: r.maxBytes, rec: rec}, nil
+}
+
+// scoped refuses a hop to a host outside the revision's network scope
+// before anything is written (the guard's allowlist and address rules
+// still apply beneath it).
+type scoped struct {
+	base  http.RoundTripper
+	scope []string
+}
+
+func (s *scoped) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !application.HostInScope(req.URL.Hostname(), s.scope) {
+		return nil, fmt.Errorf("%w: host %s is outside the revision's network scope", ErrEgress, req.URL.Hostname())
+	}
+	return s.base.RoundTrip(req)
 }
 
 // overflowRecorder notes a response body that exceeded the client's bound.

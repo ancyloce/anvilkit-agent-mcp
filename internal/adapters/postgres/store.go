@@ -190,7 +190,7 @@ func DescriptorFromRow(r sqlc.Descriptor, s sqlc.Server) (domain.Descriptor, err
 		Licenses: r.Licenses, Issuer: r.Issuer, RevisionEvidence: r.RevisionEvidence, ConnectionRef: r.ConnectionRef, State: domain.CatalogState(r.State),
 		DiscoveredBy: r.DiscoveredBy, Reviewer: str(r.Reviewer), ReviewID: str(r.ReviewID), CreatedAt: ts(r.CreatedAt), UpdatedAt: ts(r.UpdatedAt),
 	}
-	for raw, into := range map[*[]byte]any{&r.Tools: &d.Tools, &r.Resources: &d.Resources, &r.Prompts: &d.Prompts} {
+	for raw, into := range map[*[]byte]any{&r.Tools: &d.Tools, &r.Resources: &d.Resources, &r.Prompts: &d.Prompts, &r.InputSchemas: &d.InputSchemas} {
 		if len(*raw) > 0 {
 			if err := json.Unmarshal(*raw, into); err != nil {
 				return domain.Descriptor{}, fmt.Errorf("descriptor %s/%d: %w", r.ServerID, r.Revision, err)

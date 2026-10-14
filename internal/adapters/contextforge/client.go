@@ -12,6 +12,8 @@ package contextforge
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,13 +44,39 @@ type Client struct {
 // New builds the client; the HTTP client follows no redirect, so a request
 // and its bearer token never reach another host.
 func New(baseURL, tokenFile string, timeout time.Duration) *Client {
+	c, _ := NewWithTLS(baseURL, tokenFile, timeout, "", "")
+	return c
+}
+
+// NewWithTLS is New for an https placement verified against its own CA
+// bundle (P2.5: the in-cluster ContextForge of the environment, served under
+// the platform CA) and, when set, the server name to verify; the process's
+// system roots, which MCP's upstream egress uses, are left untouched.
+func NewWithTLS(baseURL, tokenFile string, timeout time.Duration, caFile, serverName string) (*Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	if caFile != "" || serverName != "" {
+		cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
+		if caFile != "" {
+			pem, err := os.ReadFile(caFile)
+			if err != nil {
+				return nil, fmt.Errorf("contextforge ca: %w", err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pem) {
+				return nil, fmt.Errorf("contextforge ca: %s holds no certificate", caFile)
+			}
+			cfg.RootCAs = pool
+		}
+		transport.TLSClientConfig = cfg
+	}
 	return &Client{
 		base:      strings.TrimRight(baseURL, "/"),
 		tokenFile: tokenFile,
-		http: &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+		http: &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
-	}
+	}, nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) (int, error) {
@@ -143,7 +171,7 @@ type named struct {
 // identity, the gateway (created once per resource, refreshed afterwards)
 // yields the live tools, resources and prompts. Nothing here authorizes
 // or executes a tool.
-func (c *Client) Discover(ctx context.Context, resource string) (domain.LiveServer, error) {
+func (c *Client) Discover(ctx context.Context, resource, _ string) (domain.LiveServer, error) {
 	// Registration first: ContextForge's handshake probe only speaks to
 	// registered gateways (its default test policy), and it stores the URL
 	// in its own normalized form, which the probe then uses.

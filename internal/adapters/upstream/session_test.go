@@ -40,12 +40,19 @@ func (f *upstreamFixture) count(tool string) int32 {
 }
 
 func newUpstreamFixture(t *testing.T, versions []string) *upstreamFixture {
+	return newVariantFixture(t, versions, "1", &mcp.ToolAnnotations{ReadOnlyHint: true}, nil)
+}
+
+// newVariantFixture serves the same tools under another server version,
+// other search_issues annotations or another search_issues output schema
+// (the P2.5 drift cases: same input schema, changed descriptor).
+func newVariantFixture(t *testing.T, versions []string, serverVersion string, searchAnnotations *mcp.ToolAnnotations, searchOutput any) *upstreamFixture {
 	f := &upstreamFixture{}
-	server := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: "1"}, &mcp.ServerOptions{SupportedProtocolVersions: versions})
+	server := mcp.NewServer(&mcp.Implementation{Name: "fixture", Version: serverVersion}, &mcp.ServerOptions{SupportedProtocolVersions: versions})
 	text := func(s string) *mcp.CallToolResult {
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: s}}}
 	}
-	server.AddTool(&mcp.Tool{Name: "search_issues", InputSchema: searchSchema}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	server.AddTool(&mcp.Tool{Name: "search_issues", InputSchema: searchSchema, Annotations: searchAnnotations, OutputSchema: searchOutput}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		return text("3 issues"), nil
 	})
 	server.AddTool(&mcp.Tool{Name: "big", InputSchema: searchSchema}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -98,9 +105,20 @@ func TestRoute(t *testing.T) {
 	require.NoError(t, err)
 	digest, err := domain.CanonicalDigest(raw)
 	require.NoError(t, err)
+	none, err := domain.CanonicalDigest(nil)
+	require.NoError(t, err)
+	plain, err := domain.AnnotationsDigest(nil)
+	require.NoError(t, err)
+	readOnly, err := domain.AnnotationsDigest(json.RawMessage(`{"readOnlyHint":true}`))
+	require.NoError(t, err)
 	target := func(method string) application.UpstreamTarget {
+		ann := plain
+		if method == "search_issues" {
+			ann = readOnly
+		}
 		return application.UpstreamTarget{Resource: f.srv.URL + "/mcp", ProtocolVersion: "2025-11-25", Transport: "streamable-http", Method: method,
-			InputSchemaDigest: digest, Token: "upstream-token"}
+			InputSchemaDigest: digest, OutputSchemaDigest: none, AnnotationsDigest: ann, ServerName: "fixture", ServerVersion: "1",
+			NetworkScope: []string{"127.0.0.1"}, Token: "upstream-token"}
 	}
 
 	t.Run("one qualified session sends exactly one call under the pinned protocol", func(t *testing.T) {
@@ -133,6 +151,45 @@ func TestRoute(t *testing.T) {
 		require.ErrorAs(t, err, &ns)
 		require.Equal(t, domain.CallSchemaDrift, ns.Code, "a method the server no longer lists")
 		require.Equal(t, int32(1), f.count("search_issues"), "nothing was sent")
+	})
+
+	t.Run("P2.5 AC4: a changed server version, a removed readOnlyHint or a changed output schema with the same input schema is refused before any send", func(t *testing.T) {
+		var ns *application.NotSentError
+		bumped := newVariantFixture(t, nil, "2", &mcp.ToolAnnotations{ReadOnlyHint: true}, nil)
+		tg := target("search_issues")
+		tg.Resource = bumped.srv.URL + "/mcp"
+		_, err := route.Open(ctx, tg)
+		require.ErrorAs(t, err, &ns)
+		require.Equal(t, domain.CallDescriptorDrift, ns.Code)
+		writable := newVariantFixture(t, nil, "1", nil, nil)
+		tg.Resource = writable.srv.URL + "/mcp"
+		_, err = route.Open(ctx, tg)
+		require.ErrorAs(t, err, &ns)
+		require.Equal(t, domain.CallDescriptorDrift, ns.Code, "readOnlyHint removed")
+		reshaped := newVariantFixture(t, nil, "1", &mcp.ToolAnnotations{ReadOnlyHint: true}, map[string]any{"type": "object", "properties": map[string]any{"count": map[string]any{"type": "integer"}}})
+		tg.Resource = reshaped.srv.URL + "/mcp"
+		_, err = route.Open(ctx, tg)
+		require.ErrorAs(t, err, &ns)
+		require.Equal(t, domain.CallSchemaDrift, ns.Code, "output schema changed")
+		for _, u := range []*upstreamFixture{bumped, writable, reshaped} {
+			require.Equal(t, int32(0), u.count("search_issues"), "nothing was sent")
+		}
+	})
+
+	t.Run("P2.5 AC4: a host outside the revision's network scope is refused at egress before anything leaves", func(t *testing.T) {
+		before := f.count("search_issues")
+		tg := target("search_issues")
+		tg.NetworkScope = []string{"tools.example.org"}
+		_, err := route.Open(ctx, tg)
+		var ns *application.NotSentError
+		require.ErrorAs(t, err, &ns)
+		require.Equal(t, domain.CallEgressRefused, ns.Code)
+		require.Equal(t, before, f.count("search_issues"))
+		// The session's transport holds every later hop to the scope as well.
+		c := WithBearer(guardClient(), "http://127.0.0.1", "")
+		c.Transport = &scoped{base: c.Transport, scope: []string{"127.0.0.1"}}
+		_, err = c.Get("http://localhost:1/")
+		require.ErrorIs(t, err, ErrEgress)
 	})
 
 	t.Run("a dropped connection after receipt is unknown and never retried", func(t *testing.T) {
@@ -260,4 +317,8 @@ func TestRoute(t *testing.T) {
 		s.Close()
 		require.False(t, errors.Is(err, ErrEgress))
 	})
+}
+
+func guardClient() *http.Client {
+	return Guard{Policy: application.NetworkPolicy{PrivateHosts: []string{"127.0.0.1", "localhost"}}, Resolver: resolver(nil)}.Client(1<<10, time.Second)
 }

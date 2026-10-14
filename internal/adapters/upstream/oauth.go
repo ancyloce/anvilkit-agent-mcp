@@ -52,11 +52,19 @@ type Authority struct {
 	now         func() time.Time
 
 	mu    sync.Mutex
-	cache map[string]*oauth2.Token
+	cache map[string]cachedToken
+}
+
+// cachedToken is one cached access token with what evicts it: the cache
+// key it was obtained under and the canonical resource it is bound to.
+type cachedToken struct {
+	token    *oauth2.Token
+	key      string
+	resource string
 }
 
 func NewAuthority(guard Guard, client *http.Client, credentials []Credential, now func() time.Time) *Authority {
-	return &Authority{guard: guard, client: client, credentials: credentials, now: now, cache: map[string]*oauth2.Token{}}
+	return &Authority{guard: guard, client: client, credentials: credentials, now: now, cache: map[string]cachedToken{}}
 }
 
 type resourceMetadata struct {
@@ -167,35 +175,61 @@ func (a *Authority) Token(ctx context.Context, g domain.Grant) (string, error) {
 	if g.Issuer == "" {
 		return "", nil
 	}
-	servers, err := a.ProtectedResource(ctx, g.CanonicalResource)
+	return a.token(ctx, g.CanonicalResource, g.Issuer, g.CacheKey())
+}
+
+// HasCredential reports whether a reviewed credential binds the resource.
+func (a *Authority) HasCredential(resource string) bool {
+	for _, c := range a.credentials {
+		if c.Resource == resource {
+			return true
+		}
+	}
+	return false
+}
+
+// DiscoveryToken is the token discovery presents to a protected resource
+// (P2.5): the resource's first authorization server and a token from the
+// reviewed credential bound to exactly that resource and issuer, cached
+// apart from every grant's. An unprotected resource needs none ("", "").
+func (a *Authority) DiscoveryToken(ctx context.Context, resource string) (token, issuer string, err error) {
+	if issuer, err = a.Issuer(ctx, resource); err != nil || issuer == "" {
+		return "", "", err
+	}
+	token, err = a.token(ctx, resource, issuer, "discovery\x00"+resource+"\x00"+issuer)
+	return token, issuer, err
+}
+
+func (a *Authority) token(ctx context.Context, resource, issuer, cacheKey string) (string, error) {
+	servers, err := a.ProtectedResource(ctx, resource)
 	if err != nil {
 		return "", err
 	}
-	if !slices.Contains(servers, g.Issuer) {
-		return "", fmt.Errorf("%w: resource no longer names issuer %s", ErrAuthority, g.Issuer)
+	if !slices.Contains(servers, issuer) {
+		return "", fmt.Errorf("%w: resource no longer names issuer %s", ErrAuthority, issuer)
 	}
 	var cred *Credential
 	for i := range a.credentials {
-		if a.credentials[i].Resource == g.CanonicalResource && a.credentials[i].Issuer == g.Issuer {
+		if a.credentials[i].Resource == resource && a.credentials[i].Issuer == issuer {
 			cred = &a.credentials[i]
 		}
 	}
 	if cred == nil {
-		return "", fmt.Errorf("%w: no reviewed credential for %s at %s", ErrAuthority, g.CanonicalResource, g.Issuer)
+		return "", fmt.Errorf("%w: no reviewed credential for %s at %s", ErrAuthority, resource, issuer)
 	}
-	key := g.CacheKey() + "\x00" + cred.ClientID
+	key := cacheKey + "\x00" + cred.ClientID
 	a.mu.Lock()
-	cached := a.cache[key]
+	cached := a.cache[key].token
 	a.mu.Unlock()
 	if cached != nil && cached.Expiry.After(a.now().Add(30*time.Second)) {
 		return cached.AccessToken, nil
 	}
-	asm, err := auth.GetAuthServerMetadata(ctx, g.Issuer, a.client)
+	asm, err := auth.GetAuthServerMetadata(ctx, issuer, a.client)
 	if err != nil {
 		return "", fmt.Errorf("%w: authorization server metadata: %v", ErrAuthority, err)
 	}
 	if asm == nil {
-		return "", fmt.Errorf("%w: issuer %s publishes no metadata", ErrAuthority, g.Issuer)
+		return "", fmt.Errorf("%w: issuer %s publishes no metadata", ErrAuthority, issuer)
 	}
 	for _, u := range []string{asm.TokenEndpoint, asm.JWKSURI} {
 		if u == "" {
@@ -211,14 +245,41 @@ func (a *Authority) Token(ctx context.Context, g domain.Grant) (string, error) {
 	}
 	cc := clientcredentials.Config{
 		ClientID: cred.ClientID, ClientSecret: strings.TrimSpace(string(secret)), TokenURL: asm.TokenEndpoint, Scopes: cred.Scopes,
-		EndpointParams: url.Values{"resource": {g.CanonicalResource}}, AuthStyle: oauth2.AuthStyleInHeader,
+		EndpointParams: url.Values{"resource": {resource}}, AuthStyle: oauth2.AuthStyleInHeader,
 	}
 	tok, err := cc.Token(context.WithValue(ctx, oauth2.HTTPClient, a.client))
 	if err != nil {
 		return "", fmt.Errorf("%w: token: %v", ErrAuthority, err)
 	}
 	a.mu.Lock()
-	a.cache[key] = tok
+	a.cache[key] = cachedToken{token: tok, key: cacheKey, resource: resource}
 	a.mu.Unlock()
 	return tok.AccessToken, nil
+}
+
+// EvictGrant drops the tokens cached under a grant's cache key (P2.8: a
+// committed revocation, consumed from mcp.grant-revoked) and answers how
+// many it dropped.
+func (a *Authority) EvictGrant(cacheKey string) int {
+	return a.evict(func(c cachedToken) bool { return c.key == cacheKey })
+}
+
+// EvictResource drops every token cached for a canonical resource, grant
+// and discovery tokens alike (P2.8: a disabled or rejected descriptor,
+// consumed from mcp.catalog-reviewed).
+func (a *Authority) EvictResource(resource string) int {
+	return a.evict(func(c cachedToken) bool { return c.resource == resource })
+}
+
+func (a *Authority) evict(match func(cachedToken) bool) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for k, c := range a.cache {
+		if match(c) {
+			delete(a.cache, k)
+			n++
+		}
+	}
+	return n
 }

@@ -90,7 +90,7 @@ func TestDiscover(t *testing.T) {
 	c := New(srv.URL, tokenFile, 5*time.Second)
 	ctx := context.Background()
 
-	live, err := c.Discover(ctx, "https://mcp.issues.example/mcp")
+	live, err := c.Discover(ctx, "https://mcp.issues.example/mcp", "2025-06-18")
 	require.NoError(t, err)
 	require.Equal(t, "2026-07-28", live.ProtocolVersion)
 	require.Equal(t, "contextforge:gw-1", live.ConnectionRef)
@@ -103,7 +103,7 @@ func TestDiscover(t *testing.T) {
 	// A rediscovery reuses the gateway (ContextForge refuses a second
 	// registration of the same URL) and refreshes it; a rotated token is used.
 	require.NoError(t, os.WriteFile(tokenFile, []byte("tok-2"), 0o600))
-	_, err = c.Discover(ctx, "https://mcp.issues.example/mcp")
+	_, err = c.Discover(ctx, "https://mcp.issues.example/mcp", "2025-06-18")
 	require.NoError(t, err)
 	require.Equal(t, 1, d.refreshes)
 	require.Len(t, d.gateways, 1)
@@ -111,7 +111,7 @@ func TestDiscover(t *testing.T) {
 	require.Equal(t, "Bearer tok-2", d.auth[len(d.auth)-1])
 
 	d.upstream = http.StatusBadGateway
-	_, err = c.Discover(ctx, "https://mcp.issues.example/mcp")
+	_, err = c.Discover(ctx, "https://mcp.issues.example/mcp", "2025-06-18")
 	require.ErrorIs(t, err, ErrUpstream)
 }
 
@@ -125,9 +125,9 @@ func TestNoRedirectAndMissingToken(t *testing.T) {
 	defer redirect.Close()
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	require.NoError(t, os.WriteFile(tokenFile, []byte("secret"), 0o600))
-	_, err := New(redirect.URL, tokenFile, time.Second).Discover(context.Background(), "https://x.example/mcp")
+	_, err := New(redirect.URL, tokenFile, time.Second).Discover(context.Background(), "https://x.example/mcp", "2025-06-18")
 	require.Error(t, err)
 	require.False(t, hit, "a redirect is never followed, so the token never reaches another host")
-	_, err = New(redirect.URL, filepath.Join(t.TempDir(), "absent"), time.Second).Discover(context.Background(), "https://x.example/mcp")
+	_, err = New(redirect.URL, filepath.Join(t.TempDir(), "absent"), time.Second).Discover(context.Background(), "https://x.example/mcp", "2025-06-18")
 	require.True(t, errors.Is(err, ErrUnavailable))
 }

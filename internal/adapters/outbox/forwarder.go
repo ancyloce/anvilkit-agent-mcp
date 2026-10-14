@@ -131,6 +131,10 @@ func natsCredentials(cfg ForwarderConfig) (nats.Option, error) {
 	}
 }
 
+// Conn is the forwarder's NATS connection, shared by the replica's event
+// consumer (P2.8); it closes with the forwarder.
+func (f *Forwarder) Conn() *nats.Conn { return f.nc }
+
 // Run forwards until ctx ends or Close is called.
 func (f *Forwarder) Run(ctx context.Context) error {
 	return f.fwd.Run(ctx)
