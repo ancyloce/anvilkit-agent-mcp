@@ -66,7 +66,19 @@ func NewServer(listen string, capacity int, tasks Tasks, catalog *application.Ca
 }
 
 // NewServerWithIdentity is NewServer with the listener identity.
-func NewServerWithIdentity(listen string, id *Identity, capacity int, tasks Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls) (*Server, error) {
+// Option adds an optional service to the server.
+type Option func(*options)
+
+type options struct{ refresh *application.Refresh }
+
+// WithRefresh registers CatalogRefreshService (P2.5).
+func WithRefresh(r *application.Refresh) Option { return func(o *options) { o.refresh = r } }
+
+func NewServerWithIdentity(listen string, id *Identity, capacity int, tasks Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls, extra ...Option) (*Server, error) {
+	var o options
+	for _, f := range extra {
+		f(&o)
+	}
 	validator, err := protovalidate.New()
 	if err != nil {
 		return nil, err
@@ -110,6 +122,9 @@ func NewServerWithIdentity(listen string, id *Identity, capacity int, tasks Task
 	}
 	if calls != nil {
 		mcpv1.RegisterCallServiceServer(s, &callServer{calls: calls})
+	}
+	if o.refresh != nil {
+		mcpv1.RegisterCatalogRefreshServiceServer(s, &refreshServer{refresh: o.refresh})
 	}
 	h.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	if id != nil {

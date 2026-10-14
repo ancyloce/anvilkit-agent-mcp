@@ -118,7 +118,24 @@ func Start(t *testing.T) *Instance {
 	if _, err := provider.Up(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	// The DEVELOPMENT_ONLY fixture set (P2.5: local-check is refused by the
+	// production schema), applied as the migration Job's -development mode
+	// does: after the domain's own set, under its own version table.
+	if fixtures := migrations + "-development"; dirExists(fixtures) {
+		fp, err := goose.NewProvider(goose.DialectPostgres, db, os.DirFS(fixtures), goose.WithVerbose(false), goose.WithTableName("goose_db_version_development"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fp.Up(ctx); err != nil {
+			t.Fatalf("migrate fixtures: %v", err)
+		}
+	}
 	return inst
+}
+
+func dirExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.IsDir()
 }
 
 func openMigrator(dsn string) (*sql.DB, error) {

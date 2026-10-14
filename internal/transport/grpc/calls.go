@@ -72,3 +72,35 @@ func (s *callServer) GetCall(ctx context.Context, req *mcpv1.GetCallRequest) (*m
 	}
 	return &mcpv1.GetCallResponse{Call: toCall(call)}, nil
 }
+
+// ReconcileCall is the operator reconciliation (P1.2) through the API's
+// operator surface (P2.5); it never sends.
+func (s *callServer) ReconcileCall(ctx context.Context, req *mcpv1.ReconcileCallRequest) (*mcpv1.ReconcileCallResponse, error) {
+	call, err := s.calls.ReconcileCallAs(ctx, scopeOf(ctx, req.GetScope()), req.GetCallId())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	return &mcpv1.ReconcileCallResponse{Call: toCall(call)}, nil
+}
+
+// refreshServer is CatalogRefreshService (P2.5): the claimant's refresh step.
+type refreshServer struct {
+	mcpv1.UnimplementedCatalogRefreshServiceServer
+	refresh *application.Refresh
+}
+
+func (s *refreshServer) AdvanceRefresh(ctx context.Context, req *mcpv1.AdvanceRefreshRequest) (*mcpv1.AdvanceRefreshResponse, error) {
+	gen, err := parseGeneration(req.GetGeneration())
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.refresh.Advance(ctx, req.GetTaskId(), gen, req.GetWorkerId(), req.GetInputDigest())
+	if err != nil {
+		return nil, toStatus(err)
+	}
+	if !out.Completed {
+		code := out.FailureCode
+		return &mcpv1.AdvanceRefreshResponse{State: mcpv1.RefreshState_REFRESH_STATE_FAILED, FailureCode: &code}, nil
+	}
+	return &mcpv1.AdvanceRefreshResponse{State: mcpv1.RefreshState_REFRESH_STATE_COMPLETED, ResultRef: out.ResultRef, ResultDigest: out.ResultDigest}, nil
+}

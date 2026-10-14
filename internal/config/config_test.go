@@ -67,6 +67,8 @@ func TestRejections(t *testing.T) {
 		{"range", "tasks:\n  max_input_bytes: 70000\n", base, "max_input_bytes"},
 		{"nats required with forwarder", "{}\n", []string{"ANVILKIT_MCP_DATABASE_URL=postgres://u:p@127.0.0.1:5432/anvilkit_mcp"}, "outbox.nats.url is required"},
 		{"snapshot missing", "apollo:\n  mode: snapshot\n", base, "apollo snapshot"},
+		{"plaintext ContextForge outside development", "grpc:\n  identity:\n    trust_domain: anvilkit.local\n", append(append([]string{}, base...), "ANVILKIT_MCP_CONTEXTFORGE_URL=http://contextforge:4444", "ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE=/t"), "catalog.contextforge.url must be https outside development"},
+		{"private hosts outside development", "grpc:\n  identity:\n    trust_domain: anvilkit.local\ncatalog:\n  private_hosts: [127.0.0.1]\n", base, "catalog.private_hosts (http and private addresses) requires development.enabled"},
 	}
 	for _, c := range cases {
 		_, err := LoadFrom(write(c.name+".yaml", c.file), c.env, 1)

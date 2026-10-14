@@ -206,12 +206,21 @@ type Catalog struct {
 	AllowedHosts []string     `koanf:"allowed_hosts"`
 	PrivateHosts []string     `koanf:"private_hosts"`
 	RolesFile    string       `koanf:"roles_file"`
+	// RefreshInterval (P2.5) is the period of the mcp-catalog-refresh
+	// requests: one per approved revision an active grant can call. 0
+	// requests none.
+	RefreshInterval time.Duration `koanf:"refresh_interval"`
 }
 
 type ContextForge struct {
 	URL       string        `koanf:"url"`
 	TokenFile string        `koanf:"token_file"`
 	Timeout   time.Duration `koanf:"timeout"`
+	// CAFile (placement, ANVILKIT_MCP_CONTEXTFORGE_CA_FILE) and ServerName
+	// verify an https placement (P2.5: the environment's in-cluster
+	// ContextForge under the platform CA).
+	CAFile     string `koanf:"ca_file"`
+	ServerName string `koanf:"server_name"`
 }
 
 // Barrier governs the reconciliation of open grant barriers (uncertain
@@ -308,6 +317,7 @@ var defaults = map[string]any{
 	"catalog.contextforge.timeout":      "60s",
 	"catalog.allowed_hosts":             []string{},
 	"catalog.private_hosts":             []string{},
+	"catalog.refresh_interval":          "0s",
 	"barrier.reconcile_interval":        "2s",
 	"barrier.reconcile_age":             "5s",
 	"calls.qualified_routes":            []map[string]any{},
@@ -342,6 +352,7 @@ var envOverrides = map[string]string{
 	"ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE":      "apollo.snapshot_file",
 	"ANVILKIT_MCP_CONTEXTFORGE_URL":          "catalog.contextforge.url",
 	"ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE":   "catalog.contextforge.token_file",
+	"ANVILKIT_MCP_CONTEXTFORGE_CA_FILE":      "catalog.contextforge.ca_file",
 	"ANVILKIT_MCP_ROLES_FILE":                "catalog.roles_file",
 	"ANVILKIT_MCP_UPSTREAM_CREDENTIALS_FILE": "calls.credentials_file",
 }
@@ -351,7 +362,7 @@ var secretKeys = []string{"database.url"}
 
 // placementKeys are per-deployment values refused inside the reviewed file
 // and inside a snapshot (they identify an environment, never a release).
-var placementKeys = []string{"database.url_file", "outbox.nats.url", "outbox.nats.creds_file", "control.address", "apollo.snapshot_file", "catalog.contextforge.url", "catalog.contextforge.token_file", "catalog.roles_file", "calls.credentials_file"}
+var placementKeys = []string{"database.url_file", "outbox.nats.url", "outbox.nats.creds_file", "control.address", "apollo.snapshot_file", "catalog.contextforge.url", "catalog.contextforge.token_file", "catalog.contextforge.ca_file", "catalog.roles_file", "calls.credentials_file"}
 
 // Generation is one complete, validated configuration: the typed snapshot,
 // its number in this process, the digest of every non-secret input as
@@ -634,8 +645,13 @@ func (c Config) validate() error {
 		u, err := url.Parse(c.Catalog.ContextForge.URL)
 		check(err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "", "catalog.contextforge.url must be an http(s) URL")
 		check(c.Catalog.ContextForge.TokenFile != "", "catalog.contextforge.token_file is required with catalog.contextforge.url (ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE)")
+		// P2.5: the bearer token never crosses a plaintext hop outside development.
+		check(err != nil || u.Scheme == "https" || c.Development.Enabled, "catalog.contextforge.url must be https outside development")
 	}
 	check(c.Catalog.ContextForge.Timeout > 0 && c.Catalog.ContextForge.Timeout <= 5*time.Minute, "catalog.contextforge.timeout must be within (0, 5m]")
+	// P2.5: http and private addresses are a fixture's, never an environment's.
+	check(len(c.Catalog.PrivateHosts) == 0 || c.Development.Enabled, "catalog.private_hosts (http and private addresses) requires development.enabled")
+	check(c.Catalog.RefreshInterval == 0 || (c.Catalog.RefreshInterval >= time.Minute && c.Catalog.RefreshInterval <= 7*24*time.Hour), "catalog.refresh_interval must be 0 (no refresh) or within [1m, 168h]")
 	check(c.Barrier.ReconcileInterval > 0 && c.Barrier.ReconcileInterval <= time.Minute, "barrier.reconcile_interval must be within (0, 1m]")
 	check(c.Barrier.ReconcileAge >= 0 && c.Barrier.ReconcileAge <= time.Hour, "barrier.reconcile_age must be within [0, 1h]")
 	check(c.Calls.SendTimeout > 0 && c.Calls.SendTimeout <= 10*time.Minute, "calls.send_timeout must be within (0, 10m]")

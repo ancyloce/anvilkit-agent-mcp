@@ -31,6 +31,9 @@ func Policy() identity.Policy {
 	add("CatalogService", []string{"ListCatalog", "GetDescriptor", "DiscoverServer", "ReviewDescriptor", "DisableDescriptor"}, api)
 	add("GrantService", []string{"CreateGrant", "GetGrant", "ListGrants", "RevokeGrant", "GetRevocationProgress"}, api)
 	add("CallService", []string{"CreateCall", "GetCall"}, api, sidecar)
+	// P2.5: the operator reconciliation comes through the API's operator surface only.
+	add("CallService", []string{"ReconcileCall"}, api)
+	add("CatalogRefreshService", []string{"AdvanceRefresh"}, backgroundWorker)
 	add("BackgroundTaskService", []string{"ClaimTask", "HeartbeatTask", "SubmitTaskResult", "GetTask"}, backgroundWorker, mcp)
 	for _, m := range []string{"Check", "Watch", "List"} {
 		p["/grpc.health.v1.Health/"+m] = []identity.Workload{identity.AnyAuthenticated}
