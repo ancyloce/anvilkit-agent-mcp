@@ -77,6 +77,29 @@ spec:
             - name: ANVILKIT_MCP_CONTROL_ADDRESS
               value: {{ .Values.control.address | quote }}
             {{- end }}
+            # P2.5: the private catalog's placements.
+            {{- if .Values.contextforge.url }}
+            - name: ANVILKIT_MCP_CONTEXTFORGE_URL
+              value: {{ .Values.contextforge.url | quote }}
+            - name: ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE
+              value: {{ include "anvilkit-agent-mcp.credentialFile" (dict "root" . "csi" "contextforge-token" "kube" (printf "/var/run/secrets/anvilkit/contextforge/%s" .Values.contextforge.token.secret.key)) }}
+            {{- if .Values.contextforge.caConfigMap.name }}
+            - name: ANVILKIT_MCP_CONTEXTFORGE_CA_FILE
+              value: /etc/anvilkit/contextforge-ca/ca.crt
+            {{- end }}
+            {{- end }}
+            {{- if .Values.roles.configMap }}
+            - name: ANVILKIT_MCP_ROLES_FILE
+              value: /etc/anvilkit/roles/roles.json
+            {{- end }}
+            {{- if .Values.upstream.credentials }}
+            - name: ANVILKIT_MCP_UPSTREAM_CREDENTIALS_FILE
+              value: /etc/anvilkit/upstream/credentials.json
+            {{- end }}
+            {{- if .Values.apollo.snapshotConfigMap }}
+            - name: ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE
+              value: /etc/anvilkit/apollo/snapshot.json
+            {{- end }}
           ports:
             - name: grpc
               containerPort: {{ .Values.listen.port }}
@@ -129,6 +152,36 @@ spec:
               mountPath: /var/run/secrets/anvilkit/nats
               readOnly: true
             {{- end }}
+            {{- if and .Values.contextforge.url .Values.contextforge.token.secret.name }}
+            - name: contextforge-token
+              mountPath: /var/run/secrets/anvilkit/contextforge
+              readOnly: true
+            {{- end }}
+            {{- if .Values.upstream.credentials }}
+            - name: upstream-secrets
+              mountPath: /var/run/secrets/anvilkit/upstream
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if and .Values.contextforge.url .Values.contextforge.caConfigMap.name }}
+            - name: contextforge-ca
+              mountPath: /etc/anvilkit/contextforge-ca
+              readOnly: true
+            {{- end }}
+            {{- if .Values.roles.configMap }}
+            - name: roles
+              mountPath: /etc/anvilkit/roles
+              readOnly: true
+            {{- end }}
+            {{- if .Values.upstream.credentials }}
+            - name: upstream-credentials
+              mountPath: /etc/anvilkit/upstream
+              readOnly: true
+            {{- end }}
+            {{- if .Values.apollo.snapshotConfigMap }}
+            - name: apollo
+              mountPath: /etc/anvilkit/apollo
+              readOnly: true
             {{- end }}
             {{- if eq .Values.identity.mode "mtls" }}
             - name: identity
@@ -286,6 +339,19 @@ spec:
             secretName: {{ .Values.nats.credentials.secret.name }}
             defaultMode: 0440
         {{- end }}
+        {{- if and .Values.contextforge.url .Values.contextforge.token.secret.name }}
+        - name: contextforge-token
+          secret:
+            secretName: {{ .Values.contextforge.token.secret.name }}
+            items: [{key: {{ .Values.contextforge.token.secret.key }}, path: {{ .Values.contextforge.token.secret.key }}}]
+            defaultMode: 0440
+        {{- end }}
+        {{- if .Values.upstream.credentials }}
+        - name: upstream-secrets
+          secret:
+            secretName: {{ .Values.upstream.secret.name }}
+            defaultMode: 0440
+        {{- end }}
         {{- if .Values.relay.enabled }}
         - name: relay-database
           secret:
@@ -294,6 +360,29 @@ spec:
           secret:
             secretName: {{ .Values.relay.queue.secret.name }}
         {{- end }}
+        {{- end }}
+        {{- if and .Values.contextforge.url .Values.contextforge.caConfigMap.name }}
+        - name: contextforge-ca
+          configMap:
+            name: {{ .Values.contextforge.caConfigMap.name }}
+            items: [{key: {{ .Values.contextforge.caConfigMap.key }}, path: ca.crt}]
+        {{- end }}
+        {{- if .Values.roles.configMap }}
+        - name: roles
+          configMap:
+            name: {{ .Values.roles.configMap }}
+            items: [{key: {{ .Values.roles.key }}, path: roles.json}]
+        {{- end }}
+        {{- if .Values.upstream.credentials }}
+        - name: upstream-credentials
+          configMap:
+            name: {{ include "anvilkit-agent-mcp.fullname" . }}-upstream
+        {{- end }}
+        {{- if .Values.apollo.snapshotConfigMap }}
+        - name: apollo
+          configMap:
+            name: {{ .Values.apollo.snapshotConfigMap }}
+            items: [{key: {{ .Values.apollo.key }}, path: snapshot.json}]
         {{- end }}
         {{- if eq .Values.identity.mode "mtls" }}
         - name: identity

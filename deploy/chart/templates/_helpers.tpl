@@ -118,6 +118,32 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- fail "telemetry.otlpTls.caSecret.name is required under telemetry.otlpTls.mode tls or mtls" }}
 {{- end }}
 {{- end }}
+{{- $catalog := .Values.config.catalog | default dict }}
+{{- if and ($catalog.private_hosts | default list) (not .Values.development.enabled) }}
+{{- fail "config.catalog.private_hosts (http and private addresses) is DEVELOPMENT_ONLY: it renders only with development.enabled: true" }}
+{{- end }}
+{{- if .Values.contextforge.url }}
+{{- if and (not (hasPrefix "https://" .Values.contextforge.url)) (not .Values.development.enabled) }}
+{{- fail "contextforge.url must be https outside development: the API token never crosses a plaintext hop" }}
+{{- end }}
+{{- if and (ne .Values.secrets.provider "csi") (not .Values.contextforge.token.secret.name) }}
+{{- fail "contextforge.token.secret.name is required with contextforge.url under secrets.provider kubernetes (or use secrets.provider csi, key contextforge-token)" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.upstream.credentials (ne .Values.secrets.provider "csi") (not .Values.upstream.secret.name) }}
+{{- fail "upstream.secret.name is required with upstream.credentials under secrets.provider kubernetes (or use secrets.provider csi, keys upstream-<secretKey>)" }}
+{{- end }}
+{{- range .Values.upstream.credentials }}
+{{- if not (and .resource .issuer .clientId .secretKey) }}
+{{- fail "every upstream.credentials entry needs resource, issuer, clientId and secretKey" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9][a-z0-9-]{0,62}$" .secretKey) }}
+{{- fail (printf "upstream.credentials secretKey %q must be a lowercase key name" .secretKey) }}
+{{- end }}
+{{- end }}
+{{- if and (eq (dig "apollo" "mode" "disabled" .Values.config) "snapshot") (not .Values.apollo.snapshotConfigMap) }}
+{{- fail "apollo.snapshotConfigMap is required while config.apollo.mode is snapshot" }}
+{{- end }}
 {{- end -}}
 
 {{/* The identity Secret: the rendered Certificate's or the environment's. */}}
@@ -146,6 +172,13 @@ the loader's keys. */}}
 {{- $ci := dict "mode" .Values.control.identity.mode -}}
 {{- if eq .Values.control.identity.mode "mtls" }}{{- $_ = set $ci "mtls" (dict "server_name" .Values.control.identity.serverName) }}{{- end -}}
 {{- $_ = set $cfg.control "identity" $ci -}}
+{{- if .Values.contextforge.serverName }}
+{{- $cat := default (dict) $cfg.catalog -}}
+{{- $cf := default (dict) $cat.contextforge -}}
+{{- $_ = set $cf "server_name" .Values.contextforge.serverName -}}
+{{- $_ = set $cat "contextforge" $cf -}}
+{{- $_ = set $cfg "catalog" $cat -}}
+{{- end -}}
 {{- $nt := dict "mode" .Values.nats.tls.mode -}}
 {{- if ne .Values.nats.tls.mode "development" }}{{- $_ = set $nt "ca_file" "/etc/anvilkit/nats-ca/ca.crt" }}{{- end -}}
 {{- if eq .Values.nats.tls.mode "mtls" }}

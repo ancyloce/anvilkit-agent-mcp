@@ -144,6 +144,49 @@ control:
     mode: mtls
     serverName: anvilkit-agent-control
 
+# P2.5: the private catalog's placements.
+#
+# contextforge: the connection layer of discovery (ANVILKIT_MCP_CONTEXTFORGE_URL,
+# https outside development) verified against caConfigMap's bundle (mounted
+# at /etc/anvilkit/contextforge-ca/ca.crt) and serverName; its API token is
+# the CSI key contextforge-token or the named Secret's key
+# (ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE). Empty url: only resources with a
+# reviewed upstream credential are discovered (through MCP's own egress).
+contextforge:
+  url: ""
+  serverName: ""
+  caConfigMap:
+    name: ""
+    key: ca.crt
+  token:
+    secret:
+      name: ""
+      key: token
+
+# The reviewed role bindings (ANVILKIT_MCP_ROLES_FILE): a ConfigMap key
+# holding the JSON array of {tenantId, actorId, role} (DEVELOPMENT_ONLY until
+# the IdP's groups are the source, ENV-02). Empty: nobody may discover,
+# review, disable, grant or reconcile.
+roles:
+  configMap: ""
+  key: roles.json
+
+# The reviewed upstream credentials (ANVILKIT_MCP_UPSTREAM_CREDENTIALS_FILE):
+# one entry per protected resource, {resource, issuer, clientId, secretKey,
+# scopes}; the chart renders the binding list (no secret in it) and each
+# client secret is a file: the CSI key upstream-<secretKey>, or the key
+# <secretKey> of upstream.secret.name.
+upstream:
+  credentials: []
+  secret:
+    name: ""
+
+# The Apollo snapshot (config.apollo.mode snapshot): a ConfigMap key mounted
+# as ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE.
+apollo:
+  snapshotConfigMap: ""
+  key: snapshot.json
+
 # The owner queue relay sidecar (the background-worker image's relay entry):
 # consumes this owner's background.requested subject with the fixed durable
 # consumer, commits inbox entries with the relay role, enqueues into this
@@ -217,6 +260,29 @@ config:
   reload:
     interval: 2s
     drain_limit: 30s
+  # P2.5: the private catalog, the grant barrier and guarded tool calls.
+  # allowed_hosts is the reviewed discovery and egress allowlist (exact hosts
+  # or ".suffix"); private_hosts (http and private addresses) renders only
+  # with development.enabled. refresh_interval is the period of the
+  # mcp-catalog-refresh requests (0: none).
+  catalog:
+    contextforge:
+      timeout: 60s
+    allowed_hosts: []
+    private_hosts: []
+    refresh_interval: 6h
+  barrier:
+    reconcile_interval: 2s
+    reconcile_age: 5s
+  # qualified_routes: the reviewed {resource, protocol_version, transport,
+  # route} combinations; every other combination stays disabled.
+  calls:
+    qualified_routes: []
+    send_timeout: 60s
+    wait: 30s
+    max_response_bytes: 1048576
+    reconcile_interval: 2s
+    reconcile_age: 2m
 
 service:
   type: ClusterIP
