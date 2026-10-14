@@ -139,15 +139,19 @@ type Descriptor struct {
 	DataClass         string
 	NetworkScope      []string
 	Licenses          []string
-	Issuer            string
-	RevisionEvidence  string
-	ConnectionRef     string
-	State             CatalogState
-	DiscoveredBy      string
-	Reviewer          string
-	ReviewID          string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// InputSchemas are each method's live input schema as discovery read it
+	// (P2.5): what a call's arguments are validated against. Their digests
+	// are the tools' inputSchemaDigest, inside the descriptor digest.
+	InputSchemas     map[string]json.RawMessage
+	Issuer           string
+	RevisionEvidence string
+	ConnectionRef    string
+	State            CatalogState
+	DiscoveredBy     string
+	Reviewer         string
+	ReviewID         string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // Method returns the descriptor's method, when it has it.
@@ -171,6 +175,43 @@ func CanonicalDigest(raw json.RawMessage) (string, error) {
 		}
 	}
 	return digestJSON(v)
+}
+
+// AnnotationsDigest digests a method's annotations by their meaning (P2.5):
+// the MCP behavior hints with the specification's defaults made explicit
+// (readOnlyHint false, destructiveHint true, idempotentHint false,
+// openWorldHint true) and the title. An explicit default and an absent hint
+// digest alike, so discovery through ContextForge's listing and the call-time
+// read through the SDK compare equal for the same server; removing a hint
+// that was set (readOnlyHint: true) changes the digest. Members outside the
+// hints are not part of what a reviewer approves.
+func AnnotationsDigest(raw json.RawMessage) (string, error) {
+	var in struct {
+		Title           *string `json:"title"`
+		ReadOnlyHint    *bool   `json:"readOnlyHint"`
+		DestructiveHint *bool   `json:"destructiveHint"`
+		IdempotentHint  *bool   `json:"idempotentHint"`
+		OpenWorldHint   *bool   `json:"openWorldHint"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return "", fmt.Errorf("%w: annotations are not a JSON object", ErrInvalid)
+		}
+	}
+	or := func(b *bool, def bool) bool {
+		if b == nil {
+			return def
+		}
+		return *b
+	}
+	title := ""
+	if in.Title != nil {
+		title = *in.Title
+	}
+	return digestJSON(map[string]any{
+		"schema": "mcp-annotations-v1", "title": title, "readOnlyHint": or(in.ReadOnlyHint, false), "destructiveHint": or(in.DestructiveHint, true),
+		"idempotentHint": or(in.IdempotentHint, false), "openWorldHint": or(in.OpenWorldHint, true),
+	})
 }
 
 func digestJSON(v any) (string, error) {
@@ -241,6 +282,7 @@ func BuildDescriptor(d Declaration, live LiveServer) (Descriptor, error) {
 		declared[t.Method] = t
 	}
 	var tools []Tool
+	schemas := map[string]json.RawMessage{}
 	for _, lt := range live.Tools {
 		decl, ok := declared[lt.Name]
 		if !ok {
@@ -255,12 +297,15 @@ func BuildDescriptor(d Declaration, live LiveServer) (Descriptor, error) {
 		if err != nil {
 			return Descriptor{}, err
 		}
-		ann, err := CanonicalDigest(lt.Annotations)
+		ann, err := AnnotationsDigest(lt.Annotations)
 		if err != nil {
 			return Descriptor{}, err
 		}
 		if (decl.InputSchemaDigest != "" && decl.InputSchemaDigest != in) || (decl.OutputSchemaDigest != "" && decl.OutputSchemaDigest != out) {
 			return Descriptor{}, fmt.Errorf("%w: schema of %s differs from the listing", ErrDescriptorMismatch, lt.Name)
+		}
+		if len(lt.InputSchema) > 0 {
+			schemas[lt.Name] = lt.InputSchema
 		}
 		tools = append(tools, Tool{Method: lt.Name, InputSchemaDigest: in, OutputSchemaDigest: out, AnnotationsDigest: ann, SideEffecting: decl.SideEffecting,
 			UnitPrice: decl.UnitPrice, Idempotent: decl.Idempotent, QuerySupported: decl.QuerySupported})
@@ -287,7 +332,7 @@ func BuildDescriptor(d Declaration, live LiveServer) (Descriptor, error) {
 		CanonicalResource: d.CanonicalResource, Transport: d.Transport, ProtocolVersion: d.ProtocolVersion, Provenance: d.Provenance,
 		Tools: tools, Resources: resources, Prompts: prompts, ResourcesDigest: rd, PromptsDigest: pd, ServerName: live.Name, ServerVersion: live.Version,
 		DataClass: d.DataClass, NetworkScope: scope, Licenses: normalizeSet(d.Licenses), RevisionEvidence: live.Evidence, ConnectionRef: live.ConnectionRef, Issuer: live.Issuer,
-		State: CatalogReviewPending,
+		InputSchemas: schemas, State: CatalogReviewPending,
 	}
 	desc.Digest, err = DescriptorDigest(desc)
 	if err != nil {

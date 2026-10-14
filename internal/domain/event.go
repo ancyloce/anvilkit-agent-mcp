@@ -8,11 +8,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// Producer and subjects of this owner (architecture.md naming, event catalog).
+// Producer and subjects of this owner (architecture.md naming, event
+// catalog). background.completed was removed from the catalog in P2.8 (no
+// consumer: the owner's own records are its completion projection).
 const (
 	Producer                   = "anvilkit-agent-mcp"
 	SubjectBackgroundRequested = "anvilkit.mcp.background.requested"
-	SubjectBackgroundCompleted = "anvilkit.mcp.background.completed"
 	AggregateBackgroundRequest = "background_request"
 )
 
@@ -42,14 +43,6 @@ type backgroundRequested struct {
 	InputDigest string `json:"inputDigest"`
 }
 
-type backgroundCompleted struct {
-	Kind         string `json:"kind"`
-	TaskID       string `json:"taskId"`
-	Generation   string `json:"generation"`
-	State        string `json:"state"`
-	ResultDigest string `json:"resultDigest,omitempty"`
-}
-
 func envelope(t Task, eventType, subject string, now time.Time, payload any) (Envelope, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -58,30 +51,19 @@ func envelope(t Task, eventType, subject string, now time.Time, payload any) (En
 	return Envelope{
 		EventID: uuid.NewString(), EventType: eventType, SchemaVersion: 1, Producer: Producer, Subject: subject,
 		TenantID: t.TenantID, AggregateType: AggregateBackgroundRequest, AggregateID: t.TaskID,
-		AggregateRevision: fmt.Sprintf("%d", t.Revision), OccurredAt: now.UTC().Format("2006-01-02T15:04:05.000000Z"),
+		AggregateRevision: fmt.Sprintf("%d", t.Generation), OccurredAt: now.UTC().Format("2006-01-02T15:04:05.000000Z"),
 		CorrelationID: t.CorrelationID, Payload: raw,
 	}, nil
 }
 
-// RequestedEvent is background.requested for a new generation.
+// RequestedEvent is background.requested for a new generation. Each
+// generation publishes it once, so its aggregateRevision is the generation,
+// which strictly increases over the task's events (P2.8, MCP-14); the row
+// revision restarts with every generation and is not used.
 func RequestedEvent(t Task, now time.Time) (Envelope, error) {
 	return envelope(t, "background.requested", SubjectBackgroundRequested, now, backgroundRequested{
 		Kind: "background.requested", TaskID: t.TaskID, Generation: fmt.Sprintf("%d", t.Generation), TaskKind: t.Kind, InputDigest: t.InputDigest,
 	})
-}
-
-// CompletedEvent is background.completed for a generation that reached a
-// terminal state (accepted, dead, stale, canceled); the payload names the
-// state and, when accepted, the result digest.
-func CompletedEvent(t Task, now time.Time) (Envelope, error) {
-	if !t.State.Terminal() {
-		return Envelope{}, fmt.Errorf("completed event of a non-terminal state %s", t.State)
-	}
-	p := backgroundCompleted{Kind: "background.completed", TaskID: t.TaskID, Generation: fmt.Sprintf("%d", t.Generation), State: string(t.State)}
-	if t.State == StateAccepted {
-		p.ResultDigest = t.ResultDigest
-	}
-	return envelope(t, "background.completed", SubjectBackgroundCompleted, now, p)
 }
 
 // Catalog and grant events (DD-08, event catalog of contracts.md): the
@@ -120,15 +102,21 @@ func aggregateEnvelope(tenantID, eventType, subject, aggregateType, aggregateID 
 }
 
 // CatalogReviewedEvent is mcp.catalog-reviewed for an approved, rejected or
-// disabled descriptor revision.
-func CatalogReviewedEvent(d Descriptor, correlationID string, now time.Time) (Envelope, error) {
-	return aggregateEnvelope(d.TenantID, "mcp.catalog-reviewed", SubjectCatalogReviewed, AggregateDescriptor, d.ServerID, d.Revision, correlationID, now,
+// disabled descriptor revision. eventRevision is the server's next event
+// sequence (MCP-14): DISABLED after APPROVED of the same descriptor
+// revision carries a greater aggregateRevision; the payload keeps the
+// descriptor revision.
+func CatalogReviewedEvent(d Descriptor, eventRevision uint64, correlationID string, now time.Time) (Envelope, error) {
+	return aggregateEnvelope(d.TenantID, "mcp.catalog-reviewed", SubjectCatalogReviewed, AggregateDescriptor, d.ServerID, eventRevision, correlationID, now,
 		catalogReviewed{Kind: "mcp.catalog-reviewed", ServerID: d.ServerID, Revision: fmt.Sprintf("%d", d.Revision), State: string(d.State)})
 }
 
 // GrantRevokedEvent is mcp.grant-revoked when a revocation commits
-// (revoking) and when its barrier converged (revoked).
-func GrantRevokedEvent(g Grant, correlationID string, now time.Time) (Envelope, error) {
-	return aggregateEnvelope(g.TenantID, "mcp.grant-revoked", SubjectGrantRevoked, AggregateGrant, g.GrantID, g.Revision, correlationID, now,
+// (revoking) and when its barrier converged (revoked). eventRevision is the
+// grant's next event sequence (MCP-14): REVOKED after REVOKING of the same
+// grant revision carries a greater aggregateRevision; the payload keeps the
+// grant revision.
+func GrantRevokedEvent(g Grant, eventRevision uint64, correlationID string, now time.Time) (Envelope, error) {
+	return aggregateEnvelope(g.TenantID, "mcp.grant-revoked", SubjectGrantRevoked, AggregateGrant, g.GrantID, eventRevision, correlationID, now,
 		grantRevoked{Kind: "mcp.grant-revoked", GrantID: g.GrantID, Revision: fmt.Sprintf("%d", g.Revision), State: string(g.State)})
 }

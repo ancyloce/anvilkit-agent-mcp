@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // Tool call rules (DD-08 §3): a call is tracked before anything is sent,
@@ -30,7 +32,7 @@ const (
 
 // Failure codes of calls.
 const (
-	CallGrantNotExecutable  = "GRANT_NOT_EXECUTABLE"
+	CallGrantNotExecutable = "GRANT_NOT_EXECUTABLE"
 	// CallAuthorizationDenied: Control's commercial authorization of the
 	// caller's execution answered deny (P2.1).
 	CallAuthorizationDenied = "AUTHORIZATION_DENIED"
@@ -38,6 +40,16 @@ const (
 	CallRouteUnqualified    = "PROFILE_UNQUALIFIED"
 	CallProtocolMismatch    = "PROTOCOL_MISMATCH"
 	CallSchemaDrift         = "SCHEMA_DRIFT"
+	// CallDescriptorDrift: the live server's identity (name, version) or a
+	// method's annotations differ from the reviewed revision (P2.5).
+	CallDescriptorDrift = "DESCRIPTOR_DRIFT"
+	// CallArgumentsInvalid: the argument bytes do not satisfy the grant
+	// revision's input schema (P2.5); nothing is recorded or sent.
+	CallArgumentsInvalid = "ARGUMENTS_INVALID"
+	// CallSchemaUnavailable: the revision holds no usable input schema for
+	// the method (discovered before P2.5, or a schema this build cannot
+	// resolve); its calls are refused until it is rediscovered.
+	CallSchemaUnavailable   = "SCHEMA_UNAVAILABLE"
 	CallAuthorization       = "AUTHORIZATION_SUBSTITUTED"
 	CallEgressRefused       = "EGRESS_REFUSED"
 	CallUpstreamUnavailable = "UPSTREAM_UNAVAILABLE"
@@ -193,6 +205,32 @@ func walkValue(dec *json.Decoder, depth int) error {
 		}
 		_, err := dec.Token()
 		return err
+	}
+	return nil
+}
+
+// CheckArguments validates a call's argument bytes against the method's
+// input schema of the grant revision (P2.5; CreateCallRequest.arguments):
+// draft 2020-12 or draft-07, local references only (a remote $ref is not
+// fetched and the schema is refused as unavailable).
+func CheckArguments(schema json.RawMessage, args []byte) error {
+	if len(schema) == 0 {
+		return fmt.Errorf("%w: %s: the revision holds no input schema for the method", ErrForbidden, CallSchemaUnavailable)
+	}
+	var s jsonschema.Schema
+	if err := json.Unmarshal(schema, &s); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrForbidden, CallSchemaUnavailable, err)
+	}
+	resolved, err := s.Resolve(nil)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrForbidden, CallSchemaUnavailable, err)
+	}
+	var instance any
+	if err := json.Unmarshal(args, &instance); err != nil {
+		return fmt.Errorf("%w: %s: arguments are not JSON", ErrInvalid, CallArgumentsInvalid)
+	}
+	if err := resolved.Validate(instance); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrInvalid, CallArgumentsInvalid, err)
 	}
 	return nil
 }

@@ -6,6 +6,7 @@
 package domain
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -86,6 +87,39 @@ const (
 // declared bytes, so the owner recomputes the expectation from the frozen
 // input and a wrong result is a profile mismatch, not an acceptance.
 const LocalCheckProfile = "local-check-v1"
+
+// CatalogRefreshProfile is the result profile of mcp-catalog-refresh (P2.5):
+// the expectation is MCP's own recorded live read of the approved revision
+// (CatalogRefreshService.AdvanceRefresh), never something the claimant
+// computes; a submission is accepted only when it carries exactly that
+// recorded reference and digest.
+const CatalogRefreshProfile = "mcp-catalog-refresh-v1"
+
+// CatalogRefreshInput is a refresh request's frozen input: the approved
+// revision whose live server is re-read and the digest it was approved at.
+type CatalogRefreshInput struct {
+	SchemaVersion    int    `json:"schemaVersion"`
+	ServerID         string `json:"serverId"`
+	Revision         uint64 `json:"revision"`
+	DescriptorDigest string `json:"descriptorDigest"`
+}
+
+// RecordedResult is an owner-recorded expectation of a profile whose result
+// is the owner's own observation (CatalogRefreshProfile).
+type RecordedResult struct {
+	Ref    string
+	Digest string
+}
+
+// RefreshResult is the reference and digest of a recorded refresh: the
+// digest binds the generation, the revision, both digests and the verdict.
+func RefreshResult(taskID string, generation uint64, serverID string, revision uint64, reviewedDigest, liveDigest string, drift bool) (ref, digest string, err error) {
+	digest, err = digestJSON(map[string]any{
+		"schema": "mcp-catalog-refresh-result-v1", "taskId": taskID, "generation": generation, "serverId": serverID, "revision": revision,
+		"reviewedDigest": reviewedDigest, "liveDigest": liveDigest, "drift": drift,
+	})
+	return fmt.Sprintf("mcp-catalog-refresh:%s:%d", taskID, generation), digest, err
+}
 
 // Errors of the decisions; the transport maps them to gRPC codes.
 var (
@@ -211,6 +245,17 @@ func checkProfileInput(profile string, input []byte) error {
 			return fmt.Errorf("%w: local-check bytes are not base64", ErrInvalid)
 		}
 		return nil
+	case CatalogRefreshProfile:
+		var in CatalogRefreshInput
+		dec := json.NewDecoder(bytes.NewReader(input))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&in); err != nil {
+			return fmt.Errorf("%w: catalog-refresh input: %v", ErrInvalid, err)
+		}
+		if in.SchemaVersion != 1 || in.ServerID == "" || in.Revision < 1 || !digestPattern.MatchString(in.DescriptorDigest) {
+			return fmt.Errorf("%w: catalog-refresh input must declare schemaVersion 1, the server, a revision and its digest", ErrInvalid)
+		}
+		return nil
 	default:
 		return fmt.Errorf("%w: result profile %q has no acceptance rule in this build", ErrProfileUnknown, profile)
 	}
@@ -219,7 +264,16 @@ func checkProfileInput(profile string, input []byte) error {
 // ExpectedResult returns the result reference and digest the profile
 // requires for this task, recomputed from the frozen input.
 func ExpectedResult(t Task) (ref, digest string, err error) {
+	return expectedResult(t, nil)
+}
+
+func expectedResult(t Task, recorded *RecordedResult) (ref, digest string, err error) {
 	switch t.ResultProfile {
+	case CatalogRefreshProfile:
+		if recorded == nil {
+			return "", "", errNoRecord
+		}
+		return recorded.Ref, recorded.Digest, nil
 	case LocalCheckProfile:
 		var in LocalCheckInput
 		if err := json.Unmarshal(t.Input, &in); err != nil {
@@ -365,6 +419,16 @@ type SubmitDecision struct {
 // reported failure consumes the attempt (retry or dead); a revoked
 // authorization cancels the request.
 func DecideSubmit(t Task, current Attempt, sub Submission, auth AuthorizationState, now time.Time, bounds Bounds) (SubmitDecision, error) {
+	return DecideSubmitRecorded(t, current, sub, auth, now, bounds, nil)
+}
+
+// errNoRecord: the owner has recorded no expectation for this generation
+// (its observation never ran): the submission is a profile mismatch.
+var errNoRecord = errors.New("no recorded expectation")
+
+// DecideSubmitRecorded is DecideSubmit for a profile whose expectation the
+// owner recorded (CatalogRefreshProfile); recorded is nil when none exists.
+func DecideSubmitRecorded(t Task, current Attempt, sub Submission, auth AuthorizationState, now time.Time, bounds Bounds, recorded *RecordedResult) (SubmitDecision, error) {
 	if !digestPattern.MatchString(sub.InputDigest) {
 		return SubmitDecision{}, fmt.Errorf("%w: input digest", ErrInvalid)
 	}
@@ -399,7 +463,10 @@ func DecideSubmit(t Task, current Attempt, sub Submission, auth AuthorizationSta
 	if !digestPattern.MatchString(sub.ResultDigest) {
 		return SubmitDecision{}, fmt.Errorf("%w: a succeeded result carries its digest", ErrInvalid)
 	}
-	ref, digest, err := ExpectedResult(t)
+	ref, digest, err := expectedResult(t, recorded)
+	if errors.Is(err, errNoRecord) {
+		return failAttempt(t, FailureProfileMismatch, now, bounds), nil
+	}
 	if err != nil {
 		return SubmitDecision{}, err
 	}

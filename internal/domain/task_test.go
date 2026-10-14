@@ -185,11 +185,4 @@ func TestExpireCancelSupersede(t *testing.T) {
 	if _, changed := Supersede(c); changed {
 		t.Fatal("supersede of terminal")
 	}
-	ev, err := CompletedEvent(c, now)
-	if err != nil || ev.Subject != SubjectBackgroundCompleted || ev.AggregateRevision != "3" {
-		t.Fatalf("event: %v %+v", err, ev)
-	}
-	if _, err := CompletedEvent(d.Task, now); err == nil {
-		t.Fatal("completed event of a leased task")
-	}
 }
