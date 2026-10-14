@@ -9,6 +9,7 @@ require (
 	github.com/ThreeDotsLabs/watermill-sql/v4 v4.1.5
 	github.com/casbin/casbin/v2 v2.135.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
+	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/knadh/koanf/parsers/yaml v1.1.0
@@ -30,7 +31,6 @@ require (
 )
 
 require (
-	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
