@@ -12,7 +12,8 @@
 # or an NKey seed, environment only; required outside development),
 # ANVILKIT_MCP_CONTROL_ADDRESS, ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE,
 # ANVILKIT_MCP_UPSTREAM_CREDENTIALS_FILE (P19, the mounted upstream credential
-# bindings). Any other
+# bindings), ANVILKIT_MCP_CONTEXTFORGE_CA_FILE (P2.5, the bundle that verifies
+# an https ContextForge). Any other
 # ANVILKIT_MCP_* variable, any unknown key here and any secret or placement
 # key here rejects the candidate before anything starts.
 #
@@ -105,13 +106,23 @@ catalog:
   # ContextForge answers discovery (handshake, gateway registration, tool,
   # resource and prompt listings); a discovery can take as long as the
   # upstream's handshake.
+  # P2.5: a protected resource whose reviewed credential MCP holds
+  # (calls.credentials_file) is discovered through MCP's own guarded egress
+  # with that credential instead; ContextForge cannot present it. Outside
+  # development the ContextForge URL is https, verified against
+  # ANVILKIT_MCP_CONTEXTFORGE_CA_FILE and server_name when set.
   contextforge:
     timeout: 60s
   # The reviewed discovery allowlist: exact hosts or ".suffix" patterns.
-  # Empty: nothing is discoverable. private_hosts (DEVELOPMENT_ONLY) may use
-  # http and resolve to loopback/private addresses.
+  # Empty: nothing is discoverable. private_hosts (DEVELOPMENT_ONLY, refused
+  # outside development) may use http and resolve to loopback/private
+  # addresses.
   allowed_hosts: []
   private_hosts: []
+  # P2.5: the period of the mcp-catalog-refresh requests, one per approved
+  # revision an active grant can call (0: none). An accepted refresh that
+  # found drift disables the revision and begins revoking its grants.
+  refresh_interval: 0s
 barrier:
   # Open grant barriers (uncertain registrations, unconfirmed fences,
   # converging revocations) untouched for reconcile_age are advanced every
