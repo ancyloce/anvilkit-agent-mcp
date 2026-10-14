@@ -48,13 +48,17 @@ type Generations struct {
 	metrics *application.Metrics
 	log     *slog.Logger
 
+	// consume is the replica's event consumer (P2.8), run beside each
+	// generation's forwarder.
+	consume func(context.Context, []byte)
+
 	mu     sync.Mutex
 	active *runtime
 	number uint64
 }
 
-func newGenerations(path string, environ []string, first config.Generation, store *postgres.Store, tasks *application.Tasks, metrics *application.Metrics, log *slog.Logger) *Generations {
-	return &Generations{path: path, environ: environ, store: store, tasks: tasks, metrics: metrics, log: log, number: first.Number}
+func newGenerations(path string, environ []string, first config.Generation, store *postgres.Store, tasks *application.Tasks, metrics *application.Metrics, log *slog.Logger, consume func(context.Context, []byte)) *Generations {
+	return &Generations{path: path, environ: environ, store: store, tasks: tasks, metrics: metrics, log: log, number: first.Number, consume: consume}
 }
 
 // Active is the active generation.
@@ -114,19 +118,32 @@ func buildRuntime(ctx context.Context, gen config.Generation, metrics *applicati
 	return rt, nil
 }
 
-func (rt *runtime) startForwarder(log *slog.Logger) {
+// startForwarder runs the generation's forwarder and, over its connection,
+// the replica's event consumer (P2.8: the credential projection); both
+// stop when the generation retires.
+func (rt *runtime) startForwarder(log *slog.Logger, consume func(context.Context, []byte)) {
 	if rt.forwarder == nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	rt.fwdCancel = cancel
 	rt.fwdDone = make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
-		defer close(rt.fwdDone)
+		defer wg.Done()
 		if err := rt.forwarder.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("outbox forwarder stopped", "generation", rt.gen.Number, "error", err)
 		}
 	}()
+	if consume != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outbox.Consume(ctx, rt.forwarder.Conn(), application.ProjectionSubjects, consume, log)
+		}()
+	}
+	go func() { wg.Wait(); close(rt.fwdDone) }()
 }
 
 // retire stops the generation's forwarder and drains its pool within the
@@ -161,7 +178,7 @@ func (g *Generations) activate(rt *runtime) {
 	previous := g.active
 	g.active = rt
 	g.mu.Unlock()
-	rt.startForwarder(g.log)
+	rt.startForwarder(g.log, g.consume)
 	g.store.Swap(rt.pool)
 	g.tasks.SetBounds(bounds(rt.gen.Config))
 	g.tasks.SetExpiry(rt.gen.ExpiresAt)

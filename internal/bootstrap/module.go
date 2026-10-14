@@ -65,8 +65,18 @@ func Module() fx.Option {
 			func(gen config.Generation, store *postgres.Store, dispatch application.DispatchQuery, clock application.Clock, log *slog.Logger, metrics *application.Metrics) *application.Tasks {
 				return application.NewTasks(store, dispatch, bounds(gen.Config), clock, log, metrics)
 			},
-			func(gen config.Generation, rt *runtime, store *postgres.Store, tasks *application.Tasks, metrics *application.Metrics, log *slog.Logger) *Generations {
-				return newGenerations(configPath(), os.Environ(), gen, store, tasks, metrics, log)
+			// P2.5: the catalog refresh binds its profile's acceptance to the
+			// owner's recorded live reads.
+			func(store *postgres.Store, catalog *application.Catalog, tasks *application.Tasks, clock application.Clock, log *slog.Logger) *application.Refresh {
+				return application.NewRefresh(store, catalog, tasks, clock, log)
+			},
+			// P2.8: every replica consumes its catalog and grant events and
+			// evicts the upstream tokens they withdraw.
+			func(store *postgres.Store, eg *egress, metrics *application.Metrics, log *slog.Logger) *application.CredentialProjection {
+				return application.NewCredentialProjection(store, eg.authority, log, metrics)
+			},
+			func(gen config.Generation, rt *runtime, store *postgres.Store, tasks *application.Tasks, metrics *application.Metrics, projection *application.CredentialProjection, log *slog.Logger) *Generations {
+				return newGenerations(configPath(), os.Environ(), gen, store, tasks, metrics, log, projection.Handle)
 			},
 			newAuthorizer,
 			newPolicyRegistry,
@@ -79,7 +89,7 @@ func Module() fx.Option {
 				return application.NewCatalog(store, conn, authz, eg.guard.Policy, application.SystemResolver, grants, clock, log).WithIssuers(eg.authority)
 			},
 			newToolDispatcher,
-			func(gen config.Generation, store *postgres.Store, dispatch application.ToolDispatcher, eg *egress, clock application.Clock, metrics *application.Metrics, log *slog.Logger) *application.Calls {
+			func(gen config.Generation, store *postgres.Store, dispatch application.ToolDispatcher, eg *egress, authz *application.Authorizer, clock application.Clock, metrics *application.Metrics, log *slog.Logger) *application.Calls {
 				c := gen.Config.Calls
 				routes := make([]application.QualifiedRoute, 0, len(c.QualifiedRoutes))
 				for _, r := range c.QualifiedRoutes {
@@ -93,16 +103,16 @@ func Module() fx.Option {
 					SendTimeout: c.SendTimeout, Wait: c.Wait, ReconcileAge: c.ReconcileAge, ReconcileBatch: 50,
 					// Operator-pending UNKNOWN calls are asked about at Control once per reconcile_age, not every pass.
 					ResolveInterval: c.ReconcileAge,
-				}, clock, metrics, log)
+				}, clock, metrics, log).WithAuthorizer(authz)
 			},
 			func(gen config.Generation, log *slog.Logger) (*workloadIdentity, error) {
 				return newWorkloadIdentity(gen.Config, log)
 			},
-			func(lc fx.Lifecycle, gen config.Generation, w *workloadIdentity, tasks *application.Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls) (*grpctransport.Server, error) {
+			func(lc fx.Lifecycle, gen config.Generation, w *workloadIdentity, tasks *application.Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls, refresh *application.Refresh) (*grpctransport.Server, error) {
 				if w.reloader != nil {
 					lc.Append(fx.Hook{OnStart: func(context.Context) error { w.reloader.Start(); return nil }, OnStop: func(context.Context) error { w.reloader.Stop(); return nil }})
 				}
-				return grpctransport.NewServerWithIdentity(gen.Config.GRPC.Listen, w.server(gen.Config), gen.Config.GRPC.Capacity, tasks, catalog, grants, calls)
+				return grpctransport.NewServerWithIdentity(gen.Config.GRPC.Listen, w.server(gen.Config), gen.Config.GRPC.Capacity, tasks, catalog, grants, calls, grpctransport.WithRefresh(refresh))
 			},
 			func(gen config.Generation, reg *prometheus.Registry) *Health {
 				return NewHealth(gen.Config.Health.Listen, reg)
@@ -276,24 +286,54 @@ func newToolDispatcher(lc fx.Lifecycle, gen config.Generation, w *workloadIdenti
 // noConnectionLayer refuses discovery without a ContextForge placement.
 type noConnectionLayer struct{}
 
-func (noConnectionLayer) Discover(context.Context, string) (domain.LiveServer, error) {
+func (noConnectionLayer) Discover(context.Context, string, string) (domain.LiveServer, error) {
 	return domain.LiveServer{}, fmt.Errorf("%w: no ContextForge placement (catalog.contextforge.url unset)", contextforge.ErrUnavailable)
 }
 
-func newConnectionLayer(gen config.Generation, log *slog.Logger) application.ConnectionLayer {
-	cf := gen.Config.Catalog.ContextForge
-	if cf.URL == "" {
-		log.Warn("no ContextForge placement: nothing is discovered (catalog.contextforge.url unset)")
-		return noConnectionLayer{}
+// routedConnection discovers a protected resource whose reviewed
+// credential MCP holds through MCP's own guarded egress (P2.5: ContextForge
+// cannot present that credential) and every other resource through
+// ContextForge.
+type routedConnection struct {
+	contextforge application.ConnectionLayer
+	egress       *upstream.Discoverer
+	authority    *upstream.Authority
+}
+
+func (r routedConnection) Discover(ctx context.Context, resource, protocolVersion string) (domain.LiveServer, error) {
+	if r.authority.HasCredential(resource) {
+		return r.egress.Discover(ctx, resource, protocolVersion)
 	}
-	return contextforge.New(cf.URL, cf.TokenFile, cf.Timeout)
+	return r.contextforge.Discover(ctx, resource, protocolVersion)
+}
+
+func newConnectionLayer(gen config.Generation, eg *egress, log *slog.Logger) (application.ConnectionLayer, error) {
+	cf := gen.Config.Catalog.ContextForge
+	var layer application.ConnectionLayer = noConnectionLayer{}
+	if cf.URL == "" {
+		log.Warn("no ContextForge placement: only resources with a reviewed credential are discovered (catalog.contextforge.url unset)")
+	} else {
+		c, err := contextforge.NewWithTLS(cf.URL, cf.TokenFile, cf.Timeout, cf.CAFile, cf.ServerName)
+		if err != nil {
+			return nil, err
+		}
+		layer = c
+	}
+	discoverer := upstream.NewDiscoverer(guardedDiscoveryClient(gen, eg), eg.authority, version, time.Now)
+	return routedConnection{contextforge: layer, egress: discoverer, authority: eg.authority}, nil
+}
+
+// guardedDiscoveryClient bounds a discovery's hops by the ContextForge
+// discovery timeout (a handshake can take as long) and the response bound.
+func guardedDiscoveryClient(gen config.Generation, eg *egress) *http.Client {
+	return eg.guard.Client(gen.Config.Calls.MaxResponseBytes, gen.Config.Catalog.ContextForge.Timeout)
 }
 
 // run orders the lifecycle: health listener, gRPC bind, generation
 // activation (pool published, forwarder started), sweeper and watcher,
 // then serving; stop in reverse with bounded drains and the generation's
 // dependencies closed last.
-func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations, tasks *application.Tasks, grants *application.Grants, calls *application.Calls, srv *grpctransport.Server, health *Health, metrics *application.Metrics, log *slog.Logger) {
+func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations, tasks *application.Tasks, grants *application.Grants, calls *application.Calls, refresh *application.Refresh, srv *grpctransport.Server, health *Health, metrics *application.Metrics, log *slog.Logger) {
 	cfg := gen.Config
 	health.valid = tasks.Ready
 	loops, cancelLoops := context.WithCancel(context.Background())
@@ -301,6 +341,7 @@ func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations,
 	watcherDone := make(chan struct{})
 	barrierDone := make(chan struct{})
 	callsDone := make(chan struct{})
+	refreshDone := make(chan struct{})
 	started := false
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) (err error) {
@@ -372,6 +413,32 @@ func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations,
 					}
 				}
 			}()
+			// P2.5: the catalog refresh producer (catalog.refresh_interval; 0: none).
+			go func() {
+				defer close(refreshDone)
+				period := cfg.Catalog.RefreshInterval
+				if period <= 0 {
+					return
+				}
+				schedule := func() {
+					if n, err := refresh.Schedule(loops, period, 500); err != nil && loops.Err() == nil {
+						log.Warn("catalog refresh scheduling failed", "error", err)
+					} else if n > 0 {
+						log.Info("catalog refresh requested", "requests", n)
+					}
+				}
+				schedule()
+				t := time.NewTicker(min(period, 5*time.Minute))
+				defer t.Stop()
+				for {
+					select {
+					case <-loops.Done():
+						return
+					case <-t.C:
+						schedule()
+					}
+				}
+			}()
 			srv.Serve()
 			health.SetReady(true)
 			started = true
@@ -397,7 +464,7 @@ func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations,
 			}
 			cancelSendStop()
 			cancelLoops()
-			for _, done := range []chan struct{}{sweeperDone, watcherDone, barrierDone, callsDone} {
+			for _, done := range []chan struct{}{sweeperDone, watcherDone, barrierDone, callsDone, refreshDone} {
 				select {
 				case <-done:
 				case <-ctx.Done():
