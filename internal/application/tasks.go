@@ -56,6 +56,24 @@ type Tasks struct {
 	clock     Clock
 	log       *slog.Logger
 	metrics   *Metrics
+	bindings  map[string]ResultBinding
+}
+
+// ResultBinding is the owner's rule for a profile whose expectation it
+// recorded itself (P2.5, mcp-catalog-refresh): Recorded returns the
+// expectation of a generation (nil when none was recorded), Accepted runs in
+// the acceptance transaction of a newly accepted result.
+type ResultBinding interface {
+	Recorded(ctx context.Context, tx postgres.Tx, t domain.Task) (*domain.RecordedResult, error)
+	Accepted(ctx context.Context, tx postgres.Tx, t domain.Task) error
+}
+
+// Bind registers a profile's result binding; called while wiring, before serving.
+func (t *Tasks) Bind(profile string, b ResultBinding) {
+	if t.bindings == nil {
+		t.bindings = map[string]ResultBinding{}
+	}
+	t.bindings[profile] = b
 }
 
 func NewTasks(store *postgres.Store, dispatch DispatchQuery, bounds domain.Bounds, clock Clock, log *slog.Logger, metrics *Metrics) *Tasks {
@@ -101,7 +119,7 @@ type RequestInput struct {
 // in one transaction (DD-09 §1 "commits BackgroundRequest and outbox before
 // queueing"). The same task with the same input returns the existing
 // generation; a different input creates the next generation and fences the
-// previous one (stale, with its own background.completed).
+// previous one (stale).
 func (t *Tasks) Request(ctx context.Context, in RequestInput) (task domain.Task, existing bool, err error) {
 	err = t.store.InTx(ctx, func(ctx context.Context, tx postgres.Tx) error {
 		if err := t.admitConfiguration(); err != nil {
@@ -179,9 +197,9 @@ func attemptOutcomeIfLeased(prev domain.Task, outcome string) string {
 	return ""
 }
 
-// apply writes a decided row (CAS on the read revision), records the
-// current attempt's outcome when one is given and publishes
-// background.completed when the row became terminal.
+// apply writes a decided row (CAS on the read revision) and records the
+// current attempt's outcome when one is given. A terminal row is its own
+// completion record (background.completed left the catalog in P2.8).
 func (t *Tasks) apply(ctx context.Context, tx postgres.Tx, task domain.Task, readRevision uint64, now time.Time, attemptOutcome string) error {
 	n, err := tx.Q.UpdateRequest(ctx, postgres.UpdateParams(task, readRevision, now))
 	if err != nil {
@@ -193,15 +211,6 @@ func (t *Tasks) apply(ctx context.Context, tx postgres.Tx, task domain.Task, rea
 	if attemptOutcome != "" && task.AttemptCount > 0 {
 		outcome := attemptOutcome
 		if err := tx.Q.SetAttemptOutcome(ctx, sqlc.SetAttemptOutcomeParams{TaskID: task.TaskID, Generation: int64(task.Generation), Ordinal: int32(task.AttemptCount), Outcome: &outcome, SubmittedAt: pgtype.Timestamptz{Time: now, Valid: true}}); err != nil {
-			return err
-		}
-	}
-	if task.State.Terminal() {
-		ev, err := domain.CompletedEvent(task, now)
-		if err != nil {
-			return err
-		}
-		if err := outbox.Publish(ctx, tx.Tx, ev); err != nil {
 			return err
 		}
 	}
@@ -311,7 +320,7 @@ func (t *Tasks) Heartbeat(ctx context.Context, taskID string, generation uint64,
 }
 
 // Submit accepts or refuses a result under the owner's CAS; acceptance and
-// background.completed commit together.
+// the result's bound records commit together.
 func (t *Tasks) Submit(ctx context.Context, taskID string, generation uint64, sub domain.Submission) (decision domain.SubmitDecision, err error) {
 	err = t.store.InTx(ctx, func(ctx context.Context, tx postgres.Tx) error {
 		row, err := tx.Q.GetRequestForUpdate(ctx, sqlc.GetRequestForUpdateParams{TaskID: taskID, Generation: int64(generation)})
@@ -331,13 +340,25 @@ func (t *Tasks) Submit(ctx context.Context, taskID string, generation uint64, su
 			return err
 		}
 		now := t.clock.Now()
-		d, err := domain.DecideSubmit(current, currentAttempt(current, attempts), sub, auth, now, t.Bounds())
+		binding := t.bindings[current.ResultProfile]
+		var recorded *domain.RecordedResult
+		if binding != nil {
+			if recorded, err = binding.Recorded(ctx, tx, current); err != nil {
+				return err
+			}
+		}
+		d, err := domain.DecideSubmitRecorded(current, currentAttempt(current, attempts), sub, auth, now, t.Bounds(), recorded)
 		if err != nil {
 			return err
 		}
 		if d.Changed {
 			if err := t.apply(ctx, tx, d.Task, current.Revision, now, d.AttemptOutcome); err != nil {
 				return err
+			}
+			if d.Accepted && binding != nil {
+				if err := binding.Accepted(ctx, tx, d.Task); err != nil {
+					return err
+				}
 			}
 		}
 		decision = d

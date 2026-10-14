@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -147,7 +148,9 @@ func TestRequestCommitsWithOutboxOrNotAtAll(t *testing.T) {
 	_, _, err = h.tasks.Request(ctx, application.RequestInput{TaskID: "task_3", TenantID: "tenant_a", Kind: domain.KindLocalCheck, Profile: domain.LocalCheckProfile, Input: localCheckInput(t, "x"), Effects: domain.EffectsReconstructible, AuthorizationRef: "grant:missing", CorrelationID: "req_3"})
 	require.ErrorIs(t, err, application.ErrForbidden)
 
-	// New input supersedes: the old generation is stale with its completed event, the new one pending.
+	// New input supersedes: the old generation is stale, the new one pending
+	// with its own background.requested (background.completed left the
+	// catalog in P2.8: no completion event is published).
 	next := h.request(t, "task_1", "hello-2")
 	require.Equal(t, uint64(2), next.Generation)
 	old, err := h.store.Queries().GetRequest(ctx, struct {
@@ -157,9 +160,16 @@ func TestRequestCommitsWithOutboxOrNotAtAll(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "stale", old.State)
 	rows = h.outboxRows(t)
-	require.Len(t, rows, 3)
-	require.Equal(t, domain.SubjectBackgroundCompleted, rows[1]["destination_topic"])
-	require.Equal(t, "stale", decodeEnvelope(t, rows[1])["payload"].(map[string]any)["state"])
+	require.Len(t, rows, 2)
+	require.Equal(t, domain.SubjectBackgroundRequested, rows[1]["destination_topic"])
+	first, second := decodeEnvelope(t, rows[0]), decodeEnvelope(t, rows[1])
+	require.Equal(t, "2", second["payload"].(map[string]any)["generation"])
+	require.Equal(t, first["aggregateId"], second["aggregateId"])
+	r1, err := strconv.ParseUint(first["aggregateRevision"].(string), 10, 64)
+	require.NoError(t, err)
+	r2, err := strconv.ParseUint(second["aggregateRevision"].(string), 10, 64)
+	require.NoError(t, err)
+	require.Greater(t, r2, r1, "aggregateRevision increases over the task's events")
 }
 
 func TestClaimRaceAndFences(t *testing.T) {
@@ -220,14 +230,16 @@ func TestClaimRaceAndFences(t *testing.T) {
 	// The superseded claimant's result cannot overwrite the current attempt.
 	_, err = h.tasks.Submit(ctx, task.TaskID, task.Generation, domain.Submission{WorkerID: winner, InputDigest: task.InputDigest, Succeeded: true, ResultRef: ref, ResultDigest: digest})
 	require.ErrorIs(t, err, domain.ErrStaleExecution)
-	// The current claimant's result is accepted, together with background.completed.
+	// The current claimant's result is accepted; the accepted row is the
+	// completion record and no event is published for it (P2.8).
+	before := len(h.outboxRows(t))
 	d, err := h.tasks.Submit(ctx, task.TaskID, task.Generation, domain.Submission{WorkerID: "w9", InputDigest: task.InputDigest, Succeeded: true, ResultRef: ref, ResultDigest: digest})
 	require.NoError(t, err)
 	require.True(t, d.Accepted)
-	rows := h.outboxRows(t)
-	last := decodeEnvelope(t, rows[len(rows)-1])
-	require.Equal(t, "background.completed", last["eventType"])
-	require.Equal(t, digest, last["payload"].(map[string]any)["resultDigest"])
+	require.Len(t, h.outboxRows(t), before)
+	accepted, err := h.tasks.Get(ctx, task.TaskID)
+	require.NoError(t, err)
+	require.Equal(t, digest, accepted.ResultDigest)
 	// An old generation cannot be claimed once superseded.
 	h.request(t, "task_r", "race-2")
 	_, _, err = h.tasks.Claim(ctx, task.TaskID, 1, "w10", time.Minute)
@@ -264,8 +276,10 @@ func TestSubmitRulesOnRealRows(t *testing.T) {
 	require.False(t, d.Accepted)
 	require.Equal(t, domain.StateCanceled, d.Task.State)
 	require.Equal(t, domain.FailureAuthorizationRevoked, d.Task.FailureCode)
-	rows := h.outboxRows(t)
-	require.Equal(t, "canceled", decodeEnvelope(t, rows[len(rows)-1])["payload"].(map[string]any)["state"])
+	// The canceled row is the record; no completion event is published (P2.8).
+	for _, row := range h.outboxRows(t) {
+		require.Equal(t, "background.requested", decodeEnvelope(t, row)["eventType"])
+	}
 	h.inst.SetGrantState(t, "g1", "active")
 
 	// Acceptance, then the identical repeat is existing; cancel afterwards is a no-op.
@@ -302,7 +316,7 @@ func TestSubmitRulesOnRealRows(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, attempts, 2)
 	require.Equal(t, "failed", *attempts[1].Outcome)
-	require.Len(t, h.outboxRows(t), before+2, "requested and completed(dead)")
+	require.Len(t, h.outboxRows(t), before+1, "requested only; the dead row is its own record (P2.8)")
 }
 
 func TestExternalEffectLeaseNeverBlindlyReassigned(t *testing.T) {

@@ -29,6 +29,7 @@ type Metrics struct {
 	DispatchQueries  *prometheus.CounterVec
 	GrantTransitions *prometheus.CounterVec
 	CallTransitions  *prometheus.CounterVec
+	EventProjections *prometheus.CounterVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -51,8 +52,9 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		DispatchQueries:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_background_dispatch_queries_total", Help: "Original-dispatch queries for expired external-effect leases by answer."}, []string{"answer"}),
 		GrantTransitions: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_grant_transitions_total", Help: "Grant state transitions by the state reached (pending, active, registration_failed, revoking, revoked)."}, []string{"state"}),
 		CallTransitions:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_tool_call_transitions_total", Help: "Tool call state transitions by the state reached (accepted, admitted, sent, succeeded, failed, denied, unknown, canceled)."}, []string{"state"}),
+		EventProjections: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_event_projections_total", Help: "Catalog and grant events the credential projection consumed by outcome (applied, stale, rejected)."}, []string{"outcome"}),
 	}
-	for _, c := range []prometheus.Collector{m.Requests, m.Claims, m.Submissions, m.LeaseOverruns, m.OverdueRetries, m.OutboxOldest, m.Forwarded, m.ForwardFailures, m.ConfigGeneration, m.ConfigRejections, m.ConfigRotations, m.DrainSeconds, m.ForcedStop, m.PoolAcquired, m.PoolTotal, m.DispatchQueries, m.GrantTransitions, m.CallTransitions} {
+	for _, c := range []prometheus.Collector{m.Requests, m.Claims, m.Submissions, m.LeaseOverruns, m.OverdueRetries, m.OutboxOldest, m.Forwarded, m.ForwardFailures, m.ConfigGeneration, m.ConfigRejections, m.ConfigRotations, m.DrainSeconds, m.ForcedStop, m.PoolAcquired, m.PoolTotal, m.DispatchQueries, m.GrantTransitions, m.CallTransitions, m.EventProjections} {
 		reg.MustRegister(c)
 	}
 	return m

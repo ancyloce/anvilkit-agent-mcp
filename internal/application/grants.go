@@ -336,7 +336,11 @@ func (g *Grants) revokeLocked(ctx context.Context, tx postgres.Tx, cur domain.Gr
 	if err := g.decide(ctx, tx, next, "revoke", decider, reason, commandID, requestDigest); err != nil {
 		return err
 	}
-	env, err := domain.GrantRevokedEvent(next, commandID, g.clock.Now())
+	rev, err := nextEventRevision(ctx, tx, domain.AggregateGrant, next.GrantID)
+	if err != nil {
+		return err
+	}
+	env, err := domain.GrantRevokedEvent(next, rev, commandID, g.clock.Now())
 	if err != nil {
 		return err
 	}
@@ -400,7 +404,11 @@ func (g *Grants) advance(ctx context.Context, grantID string) (domain.Grant, err
 			if err := g.decide(ctx, tx, next, "converge", Owner, "", "converge:"+cur.RevocationCmdID, cur.PolicyDigest); err != nil {
 				return err
 			}
-			env, err := domain.GrantRevokedEvent(next, cur.RevocationCmdID, now)
+			rev, err := nextEventRevision(ctx, tx, domain.AggregateGrant, next.GrantID)
+			if err != nil {
+				return err
+			}
+			env, err := domain.GrantRevokedEvent(next, rev, cur.RevocationCmdID, now)
 			if err != nil {
 				return err
 			}

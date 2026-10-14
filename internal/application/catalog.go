@@ -53,9 +53,12 @@ func checkCommand(cmd Command, scope Scope) error {
 	return nil
 }
 
-// ConnectionLayer is the port to ContextForge.
+// ConnectionLayer reads a live server for discovery: ContextForge, or
+// (P2.5) MCP's own guarded egress for a protected resource with a reviewed
+// credential. protocolVersion is the listing's declared version (the
+// egress route proposes exactly it; ContextForge negotiates its own).
 type ConnectionLayer interface {
-	Discover(ctx context.Context, resource string) (domain.LiveServer, error)
+	Discover(ctx context.Context, resource, protocolVersion string) (domain.LiveServer, error)
 }
 
 // IssuerSource reads the authorization server a resource names in its
@@ -87,6 +90,12 @@ func hostAllowed(host string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// HostInScope reports whether a host is one of a descriptor's network
+// scope entries (exact, or a ".suffix"); an empty scope admits nothing.
+func HostInScope(host string, scope []string) bool {
+	return hostAllowed(strings.ToLower(strings.Trim(host, "[]")), scope)
 }
 
 var metadataAddrs = []netip.Addr{netip.MustParseAddr("169.254.169.254"), netip.MustParseAddr("fd00:ec2::254")}
@@ -246,17 +255,9 @@ func (c *Catalog) Discover(ctx context.Context, cmd Command, scope Scope, decl d
 	if decl.Transport != "streamable-http" {
 		return domain.Descriptor{}, false, fmt.Errorf("%w: only streamable-http servers are discovered (stdio servers run as qualified Jobs)", ErrForbidden)
 	}
-	if err := c.policy.CheckTarget(ctx, c.resolver, decl.CanonicalResource); err != nil {
-		return domain.Descriptor{}, false, err
-	}
-	live, err := c.conn.Discover(ctx, decl.CanonicalResource)
+	live, err := c.readLive(ctx, decl.CanonicalResource, decl.ProtocolVersion)
 	if err != nil {
 		return domain.Descriptor{}, false, err
-	}
-	if c.issuers != nil {
-		if live.Issuer, err = c.issuers.Issuer(ctx, decl.CanonicalResource); err != nil {
-			return domain.Descriptor{}, false, fmt.Errorf("%w: %v", ErrForbidden, err)
-		}
 	}
 	desc, err := domain.BuildDescriptor(decl, live)
 	if err != nil {
@@ -288,12 +289,19 @@ func (c *Catalog) Discover(ctx context.Context, cmd Command, scope Scope, decl d
 			tools, _ := json.Marshal(desc.Tools)
 			resources, _ := json.Marshal(desc.Resources)
 			prompts, _ := json.Marshal(desc.Prompts)
+			schemas, err := json.Marshal(desc.InputSchemas)
+			if err != nil {
+				return err
+			}
+			if desc.InputSchemas == nil {
+				schemas = []byte("{}")
+			}
 			if err := tx.Q.InsertDescriptor(ctx, sqlc.InsertDescriptorParams{
 				ServerID: desc.ServerID, Revision: int64(desc.Revision), ProtocolVersion: desc.ProtocolVersion, Provenance: desc.Provenance,
 				DescriptorDigest: desc.Digest, Tools: tools, State: string(desc.State), CommandID: cmd.CommandID, RequestDigest: cmd.RequestDigest,
 				ServerName: desc.ServerName, ServerVersion: desc.ServerVersion, Resources: resources, Prompts: prompts, ResourcesDigest: desc.ResourcesDigest,
 				PromptsDigest: desc.PromptsDigest, DataClass: desc.DataClass, NetworkScope: desc.NetworkScope, Licenses: desc.Licenses, Issuer: desc.Issuer,
-				RevisionEvidence: desc.RevisionEvidence, ConnectionRef: desc.ConnectionRef, DiscoveredBy: desc.DiscoveredBy,
+				RevisionEvidence: desc.RevisionEvidence, ConnectionRef: desc.ConnectionRef, DiscoveredBy: desc.DiscoveredBy, InputSchemas: schemas,
 			}); err != nil {
 				return err
 			}
@@ -319,6 +327,25 @@ func (c *Catalog) Discover(ctx context.Context, cmd Command, scope Scope, decl d
 		c.log.Info("descriptor revision discovered", "serverId", out.ServerID, "revision", out.Revision, "tools", len(out.Tools))
 	}
 	return out, existing, nil
+}
+
+// readLive reads a live server for discovery and refresh alike: the
+// network policy first, then the connection layer, then the issuer the
+// resource names through MCP's guarded egress.
+func (c *Catalog) readLive(ctx context.Context, resource, protocolVersion string) (domain.LiveServer, error) {
+	if err := c.policy.CheckTarget(ctx, c.resolver, resource); err != nil {
+		return domain.LiveServer{}, err
+	}
+	live, err := c.conn.Discover(ctx, resource, protocolVersion)
+	if err != nil {
+		return domain.LiveServer{}, err
+	}
+	if c.issuers != nil {
+		if live.Issuer, err = c.issuers.Issuer(ctx, resource); err != nil {
+			return domain.LiveServer{}, fmt.Errorf("%w: %v", ErrForbidden, err)
+		}
+	}
+	return live, nil
 }
 
 // Review records a reviewer's decision on the exact digest of a revision
@@ -397,26 +424,8 @@ func (c *Catalog) Disable(ctx context.Context, cmd Command, scope Scope, serverI
 		if d.State == domain.CatalogDisabled {
 			existing, out = true, d
 		} else {
-			reviewID := idOf("rev-", cmd.TenantID, cmd.CommandID)
-			if err := tx.Q.InsertReview(ctx, sqlc.InsertReviewParams{ReviewID: reviewID, ServerID: serverID, Revision: int64(revision), DescriptorDigest: d.Digest,
-				Reviewer: scope.ActorID, Decision: "disable", ReasonCode: optional(reason), CommandID: cmd.CommandID, RequestDigest: cmd.RequestDigest, TenantID: cmd.TenantID}); err != nil {
+			if err := c.disableLocked(ctx, tx, &d, scope.ActorID, cmd.TenantID, cmd.CommandID, cmd.RequestDigest, reason); err != nil {
 				return err
-			}
-			if err := tx.Q.UpdateDescriptorState(ctx, sqlc.UpdateDescriptorStateParams{ServerID: serverID, Revision: int64(revision), State: string(domain.CatalogDisabled)}); err != nil {
-				return err
-			}
-			d.State = domain.CatalogDisabled
-			if err := c.publish(ctx, tx, d, cmd.CommandID); err != nil {
-				return err
-			}
-			ids, err := tx.Q.ListGrantsOfDescriptor(ctx, sqlc.ListGrantsOfDescriptorParams{ServerID: serverID, DescriptorRevision: int64(revision)})
-			if err != nil {
-				return err
-			}
-			for _, id := range ids {
-				if err := c.grants.revokeIn(ctx, tx, id, "disable:"+cmd.CommandID, "descriptor-disabled", scope.ActorID, "DESCRIPTOR_DISABLED"); err != nil {
-					return err
-				}
 			}
 			out = d
 		}
@@ -427,6 +436,35 @@ func (c *Catalog) Disable(ctx context.Context, cmd Command, scope Scope, serverI
 		return domain.Descriptor{}, false, err
 	}
 	return out, existing, nil
+}
+
+// disableLocked disables a locked revision: the decision as a review row,
+// the state, the catalog event, and the revocation of its active and
+// pending grants, all in the caller's transaction. Disable (an operator)
+// and an accepted refresh drift (P2.5, actor mcp-catalog-refresh) share it.
+func (c *Catalog) disableLocked(ctx context.Context, tx postgres.Tx, d *domain.Descriptor, actor, tenantID, commandID, requestDigest, reason string) error {
+	reviewID := idOf("rev-", tenantID, commandID)
+	if err := tx.Q.InsertReview(ctx, sqlc.InsertReviewParams{ReviewID: reviewID, ServerID: d.ServerID, Revision: int64(d.Revision), DescriptorDigest: d.Digest,
+		Reviewer: actor, Decision: "disable", ReasonCode: optional(reason), CommandID: commandID, RequestDigest: requestDigest, TenantID: tenantID}); err != nil {
+		return err
+	}
+	if err := tx.Q.UpdateDescriptorState(ctx, sqlc.UpdateDescriptorStateParams{ServerID: d.ServerID, Revision: int64(d.Revision), State: string(domain.CatalogDisabled)}); err != nil {
+		return err
+	}
+	d.State = domain.CatalogDisabled
+	if err := c.publish(ctx, tx, *d, commandID); err != nil {
+		return err
+	}
+	ids, err := tx.Q.ListGrantsOfDescriptor(ctx, sqlc.ListGrantsOfDescriptorParams{ServerID: d.ServerID, DescriptorRevision: int64(d.Revision)})
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := c.grants.revokeIn(ctx, tx, id, "disable:"+commandID, "descriptor-disabled", actor, "DESCRIPTOR_DISABLED"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Catalog) lockOwn(ctx context.Context, tx postgres.Tx, scope Scope, serverID string, revision uint64) (domain.Descriptor, error) {
@@ -448,7 +486,11 @@ func (c *Catalog) lockOwn(ctx context.Context, tx postgres.Tx, scope Scope, serv
 }
 
 func (c *Catalog) publish(ctx context.Context, tx postgres.Tx, d domain.Descriptor, correlation string) error {
-	env, err := domain.CatalogReviewedEvent(d, correlation, c.clock.Now())
+	rev, err := nextEventRevision(ctx, tx, domain.AggregateDescriptor, d.ServerID)
+	if err != nil {
+		return err
+	}
+	env, err := domain.CatalogReviewedEvent(d, rev, correlation, c.clock.Now())
 	if err != nil {
 		return err
 	}
@@ -528,4 +570,14 @@ func optional(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// nextEventRevision is the aggregate's next event sequence (P2.8, MCP-14),
+// taken on the event's own transaction after the aggregate's row lock.
+func nextEventRevision(ctx context.Context, tx postgres.Tx, aggregateType, aggregateID string) (uint64, error) {
+	rev, err := tx.Q.NextEventRevision(ctx, sqlc.NextEventRevisionParams{AggregateType: aggregateType, AggregateID: aggregateID})
+	if err != nil {
+		return 0, err
+	}
+	return uint64(rev), nil
 }

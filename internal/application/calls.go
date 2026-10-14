@@ -94,14 +94,23 @@ type ExecutionDecision struct {
 	Reason   string
 }
 
-// UpstreamTarget is what a send is qualified against.
+// UpstreamTarget is what a send is qualified against: the reviewed
+// revision's lock (P2.5) — the server's name and version, the method's
+// input and output schema and annotations digests — recomputed from the
+// live session and compared before anything is sent, and the revision's
+// network scope, the only hosts the session may reach.
 type UpstreamTarget struct {
-	Resource          string
-	ProtocolVersion   string
-	Transport         string
-	Method            string
-	InputSchemaDigest string
-	Token             string
+	Resource           string
+	ProtocolVersion    string
+	Transport          string
+	Method             string
+	InputSchemaDigest  string
+	OutputSchemaDigest string
+	AnnotationsDigest  string
+	ServerName         string
+	ServerVersion      string
+	NetworkScope       []string
+	Token              string
 }
 
 // UpstreamReply is the normalized result and the private native evidence.
@@ -192,6 +201,7 @@ type Calls struct {
 	clock    Clock
 	metrics  *Metrics
 	log      *slog.Logger
+	authz    *Authorizer
 
 	// Detached dispatches of this process (DD-09 §3 drain): tracked so a
 	// stop waits for them within the send bound and records what did not
@@ -340,6 +350,11 @@ func (c *Calls) Create(ctx context.Context, cmd Command, scope Scope, req domain
 		tool, ok := desc.Method(req.Method)
 		if !ok {
 			return fmt.Errorf("%w: %s: method %s", ErrForbidden, domain.CallSchemaDrift, req.Method)
+		}
+		// P2.5: the arguments against the grant revision's input schema
+		// (CreateCallRequest.arguments), before anything is recorded.
+		if err := domain.CheckArguments(desc.InputSchemas[req.Method], req.Arguments); err != nil {
+			return err
 		}
 		route, ok := c.routeOf(g)
 		if !ok {
@@ -539,8 +554,13 @@ func (c *Calls) send(ctx context.Context, call domain.Call) {
 		return
 	}
 	tool, _ := desc.Method(call.Method)
-	sendCtx, cancel := context.WithDeadline(ctx, minTime(call.Deadline, c.clock.Now().Add(c.opts.SendTimeout)))
+	// The send bound runs on the context's own (real) time: the injected
+	// clock decides admission and executability, never how long a real
+	// qualification and send may take.
+	sendCtx, cancel := context.WithTimeout(ctx, c.opts.SendTimeout)
 	defer cancel()
+	sendCtx, cancelDeadline := context.WithDeadline(sendCtx, call.Deadline)
+	defer cancelDeadline()
 	token, err := c.tokens.Token(sendCtx, g)
 	if err != nil {
 		c.log.Warn("upstream authorization refused; call not sent", "callId", call.CallID, "err", err)
@@ -553,7 +573,8 @@ func (c *Calls) send(ctx context.Context, call domain.Call) {
 		return
 	}
 	sess, err := up.Open(sendCtx, UpstreamTarget{Resource: g.CanonicalResource, ProtocolVersion: call.ProtocolVersion, Transport: call.Transport,
-		Method: call.Method, InputSchemaDigest: tool.InputSchemaDigest, Token: token})
+		Method: call.Method, InputSchemaDigest: tool.InputSchemaDigest, OutputSchemaDigest: tool.OutputSchemaDigest, AnnotationsDigest: tool.AnnotationsDigest,
+		ServerName: desc.ServerName, ServerVersion: desc.ServerVersion, NetworkScope: desc.NetworkScope, Token: token})
 	if err != nil {
 		code := domain.CallUpstreamUnavailable
 		var ns *NotSentError
@@ -786,6 +807,30 @@ func (c *Calls) dueForResolve(callID string) bool {
 	return true
 }
 
+// WithAuthorizer gives the call use cases MCP's role bindings (the
+// operator reconciliation's call-operator role, P2.5).
+func (c *Calls) WithAuthorizer(a *Authorizer) *Calls {
+	c.authz = a
+	return c
+}
+
+// ReconcileCallAs is the operator reconciliation through the API (P2.5):
+// the operator holds the call-operator role in the call's tenant; another
+// tenant's call is indistinguishable from a missing one. It never sends.
+func (c *Calls) ReconcileCallAs(ctx context.Context, scope Scope, callID string) (domain.Call, error) {
+	if err := c.authz.Require(scope.TenantID, scope.ActorID, ActCallReconcile); err != nil {
+		return domain.Call{}, err
+	}
+	call, err := c.load(ctx, c.store.Queries(), callID)
+	if err != nil {
+		return domain.Call{}, err
+	}
+	if call.TenantID != scope.TenantID {
+		return domain.Call{}, fmt.Errorf("%w: call %s", domain.ErrNotFound, callID)
+	}
+	return c.ReconcileCall(ctx, callID)
+}
+
 // ReconcileCall is the operator path (`anvilkit-agent-mcp reconcile
 // <callId>`): the call is advanced now under its original identity, an
 // UNKNOWN call by Control's current record of its original dispatch —
@@ -840,11 +885,4 @@ func (c *Calls) resolve(ctx context.Context, call domain.Call) {
 	if n, err := c.store.Queries().SetToolRequestOutcome(ctx, p); err == nil && n == 1 {
 		c.count(state)
 	}
-}
-
-func minTime(a, b time.Time) time.Time {
-	if a.Before(b) {
-		return a
-	}
-	return b
 }

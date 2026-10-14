@@ -29,6 +29,9 @@ const (
 	ActGrantCreate        = "grant.create"
 	ActGrantRevoke        = "grant.revoke"
 	ActGrantReadAll       = "grant.read_all"
+	// ActCallReconcile: the operator reconciliation of one call (P1.2,
+	// exposed through the API's operator surface since P2.5).
+	ActCallReconcile = "call.reconcile"
 )
 
 // Roles a binding may name.
@@ -36,6 +39,7 @@ const (
 	RoleCatalogManager  = "catalog_manager"
 	RoleCatalogReviewer = "catalog_reviewer"
 	RoleGrantManager    = "grant_manager"
+	RoleCallOperator    = "call_operator"
 )
 
 const authzModel = `
@@ -59,6 +63,7 @@ var authzPolicies = [][]string{
 	{RoleCatalogManager, ActCatalogDiscover}, {RoleCatalogManager, ActCatalogDisable}, {RoleCatalogManager, ActCatalogReadPending},
 	{RoleCatalogReviewer, ActCatalogReview}, {RoleCatalogReviewer, ActCatalogDisable}, {RoleCatalogReviewer, ActCatalogReadPending},
 	{RoleGrantManager, ActGrantCreate}, {RoleGrantManager, ActGrantRevoke}, {RoleGrantManager, ActGrantReadAll},
+	{RoleCallOperator, ActCallReconcile},
 }
 
 // RoleBinding binds one actor of one tenant to one role.
@@ -93,7 +98,7 @@ func NewAuthorizer(bindings []RoleBinding) (*Authorizer, error) {
 		if b.TenantID == "" || b.ActorID == "" {
 			return nil, fmt.Errorf("role binding without tenant or actor")
 		}
-		if !slices.Contains([]string{RoleCatalogManager, RoleCatalogReviewer, RoleGrantManager}, b.Role) {
+		if !slices.Contains([]string{RoleCatalogManager, RoleCatalogReviewer, RoleGrantManager, RoleCallOperator}, b.Role) {
 			return nil, fmt.Errorf("role binding names an unknown role %q", b.Role)
 		}
 		key := b.TenantID + "\x00" + b.ActorID

@@ -267,6 +267,10 @@ func TestCalls(t *testing.T) {
 				r.Arguments = []byte(`{"a":1,"a":2}`)
 				r.ArgumentDigest = domain.DigestBytes(r.Arguments)
 			},
+			"P2.5: arguments that violate the revision's input schema": func(r *domain.CallRequest) {
+				r.Arguments = []byte(`{"query":5}`)
+				r.ArgumentDigest = domain.DigestBytes(r.Arguments)
+			},
 			"no binding":        func(r *domain.CallRequest) { r.AttemptID = "" },
 			"ungranted method":  func(r *domain.CallRequest) { r.Method = "delete_issue" },
 			"stale revision":    func(r *domain.CallRequest) { r.GrantRevision = 2 },
@@ -278,8 +282,15 @@ func TestCalls(t *testing.T) {
 			_, _, err := calls.Create(ctx, c, agent, r)
 			require.Error(t, err, name)
 		}
-		c, r := call("search_issues", `{"query":"refused"}`)
-		_, _, err := calls.Create(ctx, c, application.Scope{TenantID: "tenant_a", ProjectID: "proj_b", ActorID: "agent-1"}, r)
+		c, r := call("search_issues", `{"query":5}`)
+		_, _, err := calls.Create(ctx, c, agent, r)
+		require.ErrorIs(t, err, domain.ErrInvalid)
+		require.ErrorContains(t, err, domain.CallArgumentsInvalid)
+		var tracked int
+		require.NoError(t, h.store.Pool().QueryRow(ctx, "SELECT count(*) FROM tool_requests WHERE command_id = $1", c.CommandID).Scan(&tracked))
+		require.Zero(t, tracked, "an argument refusal records nothing")
+		c, r = call("search_issues", `{"query":"refused"}`)
+		_, _, err = calls.Create(ctx, c, application.Scope{TenantID: "tenant_a", ProjectID: "proj_b", ActorID: "agent-1"}, r)
 		require.ErrorIs(t, err, domain.ErrNotFound, "another project's caller never sees the grant")
 		require.Equal(t, 0, up.count(`{"query":"refused"}`))
 	})
@@ -520,6 +531,19 @@ func TestCalls(t *testing.T) {
 		require.Equal(t, 1, up.count(`{"title":"operator"}`), "the operator path never sends")
 		_, err = calls.ReconcileCall(ctx, "call-nonexistent")
 		require.ErrorIs(t, err, domain.ErrNotFound)
+		// P2.5: through the API, the operator holds the call-operator role in the call's tenant.
+		_, err = calls.ReconcileCallAs(ctx, agent, got.CallID)
+		require.ErrorIs(t, err, application.ErrForbidden, "a caller without the role")
+		ops, err := application.NewAuthorizer([]application.RoleBinding{{TenantID: "tenant_a", ActorID: "olga-operator", Role: application.RoleCallOperator},
+			{TenantID: "tenant_b", ActorID: "otto-operator", Role: application.RoleCallOperator}})
+		require.NoError(t, err)
+		calls.WithAuthorizer(ops)
+		viaAPI, err := calls.ReconcileCallAs(ctx, application.Scope{TenantID: "tenant_a", ActorID: "olga-operator"}, got.CallID)
+		require.NoError(t, err)
+		require.Equal(t, domain.CallFailed, viaAPI.State)
+		_, err = calls.ReconcileCallAs(ctx, application.Scope{TenantID: "tenant_b", ActorID: "otto-operator"}, got.CallID)
+		require.ErrorIs(t, err, domain.ErrNotFound, "another tenant's call is indistinguishable from a missing one")
+		require.Equal(t, 1, up.count(`{"title":"operator"}`), "the operator path never sends")
 	})
 
 	t.Run("P1.2: a stop waits for in-flight sends within its bound and records UNKNOWN for what did not finish", func(t *testing.T) {

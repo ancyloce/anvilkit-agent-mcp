@@ -29,7 +29,7 @@ type fakeConnection struct {
 	calls int
 }
 
-func (f *fakeConnection) Discover(_ context.Context, resource string) (domain.LiveServer, error) {
+func (f *fakeConnection) Discover(_ context.Context, resource, _ string) (domain.LiveServer, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
