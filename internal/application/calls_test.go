@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/application"
@@ -191,12 +192,13 @@ func TestCalls(t *testing.T) {
 	require.Equal(t, domain.GrantActive, g.State)
 
 	disp := newFakeToolDispatch()
+	metrics := application.NewMetrics(prometheus.NewRegistry())
 	up := &fakeUpstream{sends: map[string]int{}}
 	tokens := &fakeTokens{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	calls := application.NewCalls(h.store, disp, map[string]application.Upstream{"go-sdk": up}, tokens,
 		[]application.QualifiedRoute{{Resource: issuesURL, ProtocolVersion: protocol, Transport: "streamable-http", Route: "go-sdk"}},
-		application.CallOptions{SendTimeout: 5 * time.Second, Wait: 5 * time.Second, ReconcileAge: 0, ReconcileBatch: 50}, h.clock, application.NewMetrics(prometheus.NewRegistry()), log)
+		application.CallOptions{SendTimeout: 5 * time.Second, Wait: 5 * time.Second, ReconcileAge: 0, ReconcileBatch: 50}, h.clock, metrics, log)
 	n := 0
 	call := func(method, args string) (application.Command, domain.CallRequest) {
 		n++
@@ -433,6 +435,12 @@ func TestCalls(t *testing.T) {
 		_, _, err = calls.Create(ctx, c, agent, r)
 		require.ErrorIs(t, err, application.ErrForbidden)
 		require.ErrorContains(t, err, domain.CallRecoveryRestricted)
+		// P3.6: the refusal is counted; the observe loop reports the UNKNOWN
+		// call and the server it restricts.
+		require.Equal(t, 1.0, metricValue(t, metrics.RestrictedRefusals))
+		application.NewTasks(h.store, nil, domain.Bounds{}, h.clock, log, metrics).Observe(ctx, "anvilkit-mcp")
+		require.Equal(t, 1.0, metricValue(t, metrics.UnknownCalls))
+		require.Equal(t, 1.0, metricValue(t, metrics.RestrictedServers))
 		reconcile()
 		got, _ = calls.Get(ctx, agent, got.CallID)
 		require.Equal(t, domain.CallUnknown, got.State, "no query answers it: recovery stays manual")
@@ -614,4 +622,14 @@ func TestCalls(t *testing.T) {
 		_, _, err = calls.Create(ctx, c, agent, r)
 		require.ErrorIs(t, err, application.ErrForbidden, "a revoking grant admits no new call")
 	})
+}
+
+func metricValue(t *testing.T, m prometheus.Metric) float64 {
+	t.Helper()
+	var out dto.Metric
+	require.NoError(t, m.Write(&out))
+	if out.Counter != nil {
+		return out.GetCounter().GetValue()
+	}
+	return out.GetGauge().GetValue()
 }

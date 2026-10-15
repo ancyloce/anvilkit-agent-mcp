@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -86,6 +87,9 @@ func NewTasks(store *postgres.Store, dispatch DispatchQuery, bounds domain.Bound
 // generation replaces them whole (SetBounds) and governs new admissions
 // only — requests froze their attempt bound and leases their length.
 func (t *Tasks) Bounds() domain.Bounds { return *t.bounds.Load() }
+
+// Pool is the active generation's database pool (the retention loop's).
+func (t *Tasks) Pool() *pgxpool.Pool { return t.store.Pool() }
 
 func (t *Tasks) SetBounds(b domain.Bounds)  { t.bounds.Store(&b) }
 func (t *Tasks) SetExpiry(expiry time.Time) { t.expiresAt.Store(&expiry) }
@@ -487,6 +491,11 @@ func (t *Tasks) Observe(ctx context.Context, consumerGroup string) {
 	}
 	if age, err := q.OldestUnforwardedSeconds(ctx, consumerGroup); err == nil {
 		t.metrics.OutboxOldest.Set(age)
+	}
+	if u, err := q.UnknownToolCallStats(ctx); err == nil {
+		t.metrics.UnknownCalls.Set(float64(u.Calls))
+		t.metrics.RestrictedServers.Set(float64(u.RestrictedServers))
+		t.metrics.UnknownOldest.Set(u.OldestSeconds)
 	}
 	stat := t.store.Pool().Stat()
 	t.metrics.PoolAcquired.Set(float64(stat.AcquiredConns()))

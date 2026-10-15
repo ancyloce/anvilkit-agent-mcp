@@ -365,6 +365,9 @@ func (c *Calls) Create(ctx context.Context, cmd Command, scope Scope, req domain
 			return err
 		}
 		if restricted {
+			if c.metrics != nil {
+				c.metrics.RestrictedRefusals.Inc()
+			}
 			return fmt.Errorf("%w: %s: a call to server %s has an unknown outcome", ErrForbidden, domain.CallRecoveryRestricted, g.ServerID)
 		}
 		return tx.Q.InsertToolRequest(ctx, sqlc.InsertToolRequestParams{
