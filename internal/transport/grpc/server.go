@@ -10,6 +10,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/metadata"
 	"log/slog"
 	"net"
 	"time"
@@ -84,7 +87,7 @@ func NewServerWithIdentity(listen string, id *Identity, capacity int, tasks Task
 		return nil, err
 	}
 	slots := make(chan struct{}, capacity)
-	unary := []grpc.UnaryServerInterceptor{bounded(slots), validateUnary(validator)}
+	unary := []grpc.UnaryServerInterceptor{requestIDUnary, bounded(slots), validateUnary(validator)}
 	var stream []grpc.StreamServerInterceptor
 	var authz *identity.Authorizer
 	// Spans carry the gRPC semantic attributes only (service, method, status
@@ -326,4 +329,21 @@ func (b *backgroundServer) GetTask(ctx context.Context, req *mcpv1.GetTaskReques
 		return nil, toStatus(err)
 	}
 	return &mcpv1.GetTaskResponse{Task: toProto(task)}, nil
+}
+
+// requestIDKey is the metadata the API sends with every call it makes for a
+// public request (P3.6, API-09); requestIDAttribute names it on this
+// server's span, so one trace links the public error envelope's requestId
+// to MCP's work. The identifier is the API's opaque req_ value.
+const (
+	requestIDKey       = "x-anvilkit-request-id"
+	requestIDAttribute = "anvilkit.request_id"
+)
+
+func requestIDUnary(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	if v := md.Get(requestIDKey); len(v) == 1 && len(v[0]) <= 64 {
+		trace.SpanFromContext(ctx).SetAttributes(attribute.String(requestIDAttribute, v[0]))
+	}
+	return handler(ctx, req)
 }

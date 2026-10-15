@@ -123,6 +123,18 @@ type Tasks struct {
 	SweepInterval time.Duration `koanf:"sweep_interval"`
 }
 
+// Retention bounds the delivery tables (P3.7): outbox rows the forwarder
+// acknowledged, inbox entries past their deduplication window and the
+// attempts of terminal requests are deleted after their retention, a
+// bounded batch per table every Interval.
+type Retention struct {
+	Outbox   time.Duration `koanf:"outbox"`
+	Inbox    time.Duration `koanf:"inbox"`
+	Attempts time.Duration `koanf:"attempts"`
+	Interval time.Duration `koanf:"interval"`
+	Batch    int           `koanf:"batch"`
+}
+
 // Outbox is the forwarder module: the watermill-sql subscriber over the
 // outbox/outbox_offsets tables and the JetStream publisher.
 type Outbox struct {
@@ -273,6 +285,7 @@ type Config struct {
 	Database    Database    `koanf:"database"`
 	Tasks       Tasks       `koanf:"tasks"`
 	Outbox      Outbox      `koanf:"outbox"`
+	Retention   Retention   `koanf:"retention"`
 	Control     Control     `koanf:"control"`
 	Apollo      Apollo      `koanf:"apollo"`
 	Reload      Reload      `koanf:"reload"`
@@ -301,6 +314,11 @@ var defaults = map[string]any{
 	"tasks.retry_delay":                 "5s",
 	"tasks.max_attempts":                3,
 	"tasks.sweep_interval":              "2s",
+	"retention.outbox":                  "168h",
+	"retention.inbox":                   "168h",
+	"retention.attempts":                "720h",
+	"retention.interval":                "10m",
+	"retention.batch":                   1000,
 	"outbox.forwarder_enabled":          true,
 	"outbox.consumer_group":             "anvilkit-agent-mcp-forwarder",
 	"outbox.poll_interval":              "500ms",
@@ -624,6 +642,11 @@ func (c Config) validate() error {
 	check(c.Tasks.MaxAttempts >= 1 && c.Tasks.MaxAttempts <= 100, "tasks.max_attempts must be within [1, 100]")
 	check(c.Tasks.SweepInterval > 0 && c.Tasks.SweepInterval <= time.Minute, "tasks.sweep_interval must be within (0, 1m]")
 	check(c.Tasks.SweepInterval < c.Tasks.MaxLease, "tasks.sweep_interval must be shorter than tasks.max_lease")
+	for name, d := range map[string]time.Duration{"retention.outbox": c.Retention.Outbox, "retention.inbox": c.Retention.Inbox, "retention.attempts": c.Retention.Attempts} {
+		check(d >= time.Hour && d <= 2160*time.Hour, "%s %s outside [1h, 2160h]", name, d)
+	}
+	check(c.Retention.Interval >= time.Minute && c.Retention.Interval <= 24*time.Hour, "retention.interval %s outside [1m, 24h]", c.Retention.Interval)
+	check(c.Retention.Batch >= 1 && c.Retention.Batch <= 10000, "retention.batch %d outside [1, 10000]", c.Retention.Batch)
 	check(c.Outbox.ConsumerGroup != "", "outbox.consumer_group is required")
 	check(c.Outbox.PollInterval > 0 && c.Outbox.PollInterval <= time.Minute, "outbox.poll_interval must be within (0, 1m]")
 	check(c.Outbox.AckDeadline > 0 && c.Outbox.AckDeadline <= 5*time.Minute, "outbox.ack_deadline must be within (0, 5m]")
