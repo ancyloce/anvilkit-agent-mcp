@@ -469,3 +469,26 @@ func (q *Queries) SetToolRequestOutcome(ctx context.Context, arg SetToolRequestO
 	}
 	return result.RowsAffected(), nil
 }
+
+const unknownToolCallStats = `-- name: UnknownToolCallStats :one
+SELECT count(*)::bigint AS calls,
+       count(DISTINCT (tenant_id, server_id))::bigint AS restricted_servers,
+       coalesce(extract(epoch FROM now() - min(updated_at)), 0)::float8 AS oldest_seconds
+FROM tool_requests WHERE state = 'unknown'
+`
+
+type UnknownToolCallStatsRow struct {
+	Calls             int64
+	RestrictedServers int64
+	OldestSeconds     float64
+}
+
+// P3.6: the UNKNOWN tool calls for the operator's gauges: their number, the
+// (tenant, server) pairs they restrict (RECOVERY_RESTRICTED) and the age of
+// the oldest since it last changed. Served by tool_requests_unknown_idx.
+func (q *Queries) UnknownToolCallStats(ctx context.Context) (UnknownToolCallStatsRow, error) {
+	row := q.db.QueryRow(ctx, unknownToolCallStats)
+	var i UnknownToolCallStatsRow
+	err := row.Scan(&i.Calls, &i.RestrictedServers, &i.OldestSeconds)
+	return i, err
+}

@@ -51,3 +51,12 @@ WHERE ((state IN ('accepted', 'admitted', 'unknown') OR (observed_at IS NULL AND
      OR (state = 'sent' AND send_marker_at < now() - make_interval(secs => sqlc.arg(sent_age_seconds)::float8)))
   AND (updated_at, call_id) > (sqlc.arg(after_at)::timestamptz, sqlc.arg(after_id)::text)
 ORDER BY updated_at, call_id LIMIT $1;
+
+-- name: UnknownToolCallStats :one
+-- P3.6: the UNKNOWN tool calls for the operator's gauges: their number, the
+-- (tenant, server) pairs they restrict (RECOVERY_RESTRICTED) and the age of
+-- the oldest since it last changed. Served by tool_requests_unknown_idx.
+SELECT count(*)::bigint AS calls,
+       count(DISTINCT (tenant_id, server_id))::bigint AS restricted_servers,
+       coalesce(extract(epoch FROM now() - min(updated_at)), 0)::float8 AS oldest_seconds
+FROM tool_requests WHERE state = 'unknown';
