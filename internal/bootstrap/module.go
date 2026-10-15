@@ -25,6 +25,7 @@ import (
 
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/adapters/contextforge"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/adapters/control"
+	"github.com/ancyloce/anvilkit-agent-mcp/internal/adapters/outbox"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/adapters/postgres"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/adapters/upstream"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/application"
@@ -342,6 +343,8 @@ func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations,
 	barrierDone := make(chan struct{})
 	callsDone := make(chan struct{})
 	refreshDone := make(chan struct{})
+	retentionDone := make(chan struct{})
+	schemaDone := make(chan struct{})
 	started := false
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) (err error) {
@@ -362,6 +365,19 @@ func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations,
 				return err
 			}
 			gens.activate(rt)
+			// The first schema check answers before readiness is offered;
+			// a schema behind the minimum is watched until it holds.
+			first, cancelFirst := context.WithTimeout(ctx, 5*time.Second)
+			if err := checkSchema(first, gens.store.Pool(), MinimumSchemaVersion); err != nil {
+				health.setSchema(err.Error())
+				go func() {
+					defer close(schemaDone)
+					watchSchema(loops, health, gens.store.Pool, MinimumSchemaVersion, 5*time.Second, log)
+				}()
+			} else {
+				close(schemaDone)
+			}
+			cancelFirst()
 			go func() {
 				defer close(sweeperDone)
 				t := time.NewTicker(cfg.Tasks.SweepInterval)
@@ -409,6 +425,30 @@ func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations,
 					case <-t.C:
 						if _, err := calls.Reconcile(loops); err != nil && loops.Err() == nil {
 							log.Warn("tool call reconciliation failed", "error", err)
+						}
+					}
+				}
+			}()
+			// P3.7: the delivery tables' retention, a bounded batch per table
+			// every retention.interval.
+			go func() {
+				defer close(retentionDone)
+				t := time.NewTicker(cfg.Retention.Interval)
+				defer t.Stop()
+				for {
+					select {
+					case <-loops.Done():
+						return
+					case <-t.C:
+						now := time.Now()
+						pruned, err := outbox.Retain(loops, tasks.Pool(), outbox.Bounds{ConsumerGroup: cfg.Outbox.ConsumerGroup,
+							OutboxBefore: now.Add(-cfg.Retention.Outbox), InboxBefore: now.Add(-cfg.Retention.Inbox),
+							AttemptsBefore: now.Add(-cfg.Retention.Attempts), Batch: cfg.Retention.Batch})
+						for table, n := range pruned {
+							metrics.DeliveryPruned.WithLabelValues(table).Add(float64(n))
+						}
+						if err != nil && loops.Err() == nil {
+							log.Warn("delivery retention failed; retried next interval", "error", err)
 						}
 					}
 				}
@@ -464,7 +504,7 @@ func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations,
 			}
 			cancelSendStop()
 			cancelLoops()
-			for _, done := range []chan struct{}{sweeperDone, watcherDone, barrierDone, callsDone, refreshDone} {
+			for _, done := range []chan struct{}{sweeperDone, watcherDone, barrierDone, callsDone, refreshDone, retentionDone, schemaDone} {
 				select {
 				case <-done:
 				case <-ctx.Done():

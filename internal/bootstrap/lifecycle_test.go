@@ -211,6 +211,9 @@ func TestStartupFailureUnwinds(t *testing.T) {
 
 func TestActiveSnapshotExpiryAndRenewal(t *testing.T) {
 	inst := testdb.Start(t)
+	// testdb reads ANVILKIT_MCP_MIGRATIONS_DIR (the CI's sparse parent
+	// checkout); the service must see only the inputs set below.
+	isolateEnvironment(t)
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.yaml")
 	snapshot := filepath.Join(dir, "snapshot.json")

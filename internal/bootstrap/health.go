@@ -12,8 +12,9 @@ import (
 )
 
 // Health is the plaintext probe and metrics listener: /healthz answers 200
-// while the process runs, /readyz 200 only while the gRPC listener serves
-// and no shutdown has started, /metrics the Prometheus exposition. It is
+// while the process runs, /readyz 200 only while the gRPC listener serves,
+// the schema is at or above the binary's minimum and no shutdown has
+// started, /metrics the Prometheus exposition. It is
 // the first listener up and the last down so a scrape during the drain
 // still sees the shutdown gauges.
 type Health struct {
@@ -21,6 +22,9 @@ type Health struct {
 	ln    net.Listener
 	ready atomic.Bool
 	valid func() bool
+	// schema is the reason readiness is withheld for the schema version
+	// (P3.1 AC4); empty once the schema holds.
+	schema atomic.Pointer[string]
 }
 
 func NewHealth(listen string, reg *prometheus.Registry) *Health {
@@ -28,6 +32,11 @@ func NewHealth(listen string, reg *prometheus.Registry) *Health {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if reason := h.schema.Load(); reason != nil && *reason != "" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("schema: " + *reason))
+			return
+		}
 		if h.ready.Load() && (h.valid == nil || h.valid()) {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -50,6 +59,8 @@ func (h *Health) Start() (net.Addr, error) {
 }
 
 func (h *Health) SetReady(ready bool) { h.ready.Store(ready) }
+
+func (h *Health) setSchema(reason string) { h.schema.Store(&reason) }
 
 func (h *Health) Stop(ctx context.Context) error {
 	h.ready.Store(false)
