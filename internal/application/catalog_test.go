@@ -91,6 +91,8 @@ type catalogHarness struct {
 	grants   *application.Grants
 	registry *fakeRegistry
 	clock    *fakeClock
+	authz    *application.Authorizer
+	metrics  *application.Metrics
 	seq      int
 }
 
@@ -123,11 +125,12 @@ func newCatalogHarness(t *testing.T) *catalogHarness {
 	clock := &fakeClock{now: time.Now().UTC()}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	registry := newFakeRegistry()
-	grants := application.NewGrants(store, authz, registry, clock, log, application.NewMetrics(prometheus.NewRegistry()))
+	metrics := application.NewMetrics(prometheus.NewRegistry())
+	grants := application.NewGrants(store, authz, registry, clock, log, metrics)
 	resolver := fakeResolver{"mcp.issues.example": {netip.MustParseAddr("203.0.113.10")}, "internal.example": {netip.MustParseAddr("10.0.0.5")},
 		"metadata.example": {netip.MustParseAddr("169.254.169.254")}, "fixture.local": {netip.MustParseAddr("127.0.0.1")}}
 	policy := application.NetworkPolicy{AllowedHosts: []string{".issues.example", "internal.example", "metadata.example"}, PrivateHosts: []string{"fixture.local"}}
-	return &catalogHarness{inst: inst, store: store, conn: conn, grants: grants, registry: registry, clock: clock,
+	return &catalogHarness{inst: inst, store: store, conn: conn, grants: grants, registry: registry, clock: clock, authz: authz, metrics: metrics,
 		catalog: application.NewCatalog(store, conn, authz, policy, resolver, grants, clock, log)}
 }
 

@@ -383,7 +383,10 @@ func (g *Grants) advance(ctx context.Context, grantID string) (domain.Grant, err
 	if err != nil {
 		return gr, err
 	}
-	var out domain.Grant
+	var (
+		out        domain.Grant
+		milestones map[string]float64
+	)
 	err = g.store.InTx(ctx, func(ctx context.Context, tx postgres.Tx) error {
 		cur, err := g.lock(ctx, tx, grantID)
 		if err != nil {
@@ -419,14 +422,57 @@ func (g *Grants) advance(ctx context.Context, grantID string) (domain.Grant, err
 		if err := g.update(ctx, tx, next, cur.State); err != nil {
 			return err
 		}
+		if milestones, err = revocationMilestones(ctx, tx, cur, next); err != nil {
+			return err
+		}
 		out = next
 		return nil
 	})
+	if err == nil {
+		for stage, seconds := range milestones {
+			g.metrics.RevocationSeconds.WithLabelValues(stage).Observe(seconds)
+		}
+	}
 	if err == nil && out.State == domain.GrantRevoked {
 		g.metrics.GrantTransitions.WithLabelValues("revoked").Inc()
 		g.log.Info("grant revoked: the barrier converged", "grantId", grantID)
 	}
 	return out, err
+}
+
+// revocationMilestones are the barrier milestones (P3.6, platform.md SLO
+// row 3) the commit of next reaches, in seconds from the revocation's
+// commit: "fenced" when it first records Control's fence, at Control's
+// fencedAt (from then Control admits no new tool call of the revision;
+// MCP's own admission refused them from the revocation's commit), and
+// "converged" when it makes the grant REVOKED (Control's barrier converged
+// and no request of the grant is open in MCP). Each is reached by exactly
+// one commit under the grant lock, so whichever replica commits it
+// observes it, once; a lost Control answer, a repeated command or a
+// replica that loses the lock records nothing and observes nothing.
+func revocationMilestones(ctx context.Context, tx postgres.Tx, cur, next domain.Grant) (map[string]float64, error) {
+	fenced, converged := cur.ControlState == "none", next.State == domain.GrantRevoked
+	if !fenced && !converged {
+		return nil, nil
+	}
+	r, err := tx.Q.GetRevocationRequest(ctx, sqlc.GetRevocationRequestParams{GrantID: cur.GrantID, ToRevision: int64(cur.Revision)})
+	if err != nil || !r.RequestedAt.Valid {
+		return nil, err
+	}
+	since := func(at time.Time) float64 { return max(at.Sub(r.RequestedAt.Time).Seconds(), 0) }
+	out := map[string]float64{}
+	if fenced {
+		// Control's clock, against the database's: a skew below zero counts as none.
+		at := r.ObservedAt.Time
+		if next.FencedAt != nil {
+			at = *next.FencedAt
+		}
+		out["fenced"] = since(at)
+	}
+	if converged {
+		out["converged"] = since(r.ObservedAt.Time)
+	}
+	return out, nil
 }
 
 // Progress is a grant's management outcome as the caller may see it.

@@ -37,6 +37,9 @@ type Metrics struct {
 	RestrictedRefusals prometheus.Counter
 	// P3.7: delivery rows deleted past their retention, by table.
 	DeliveryPruned *prometheus.CounterVec
+	// P3.6 (platform.md SLO row 3): the revocation barrier's milestones in
+	// seconds from the revocation's commit, by stage (fenced, converged).
+	RevocationSeconds *prometheus.HistogramVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -65,8 +68,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		UnknownOldest:      prometheus.NewGauge(prometheus.GaugeOpts{Name: "anvilkit_mcp_tool_call_unknown_oldest_seconds", Help: "Age of the oldest UNKNOWN tool call since it last changed; 0 when there is none."}),
 		RestrictedRefusals: prometheus.NewCounter(prometheus.CounterOpts{Name: "anvilkit_mcp_recovery_restricted_refusals_total", Help: "Tool calls refused with RECOVERY_RESTRICTED."}),
 		DeliveryPruned:     prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_delivery_pruned_total", Help: "Delivery rows (acknowledged outbox, old inbox, terminal requests' attempts) deleted past their retention, by table."}, []string{"table"}),
+		RevocationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "anvilkit_mcp_grant_revocation_seconds",
+			Help:    "Seconds from a grant revocation's commit to Control's fence (stage fenced: no new tool admission) and to REVOKED (stage converged: every sender converged), observed once per revocation.",
+			Buckets: prometheus.ExponentialBuckets(0.01, 2, 22)}, []string{"stage"}),
 	}
-	for _, c := range []prometheus.Collector{m.Requests, m.Claims, m.Submissions, m.LeaseOverruns, m.OverdueRetries, m.OutboxOldest, m.Forwarded, m.ForwardFailures, m.ConfigGeneration, m.ConfigRejections, m.ConfigRotations, m.DrainSeconds, m.ForcedStop, m.PoolAcquired, m.PoolTotal, m.DispatchQueries, m.GrantTransitions, m.CallTransitions, m.EventProjections, m.UnknownCalls, m.RestrictedServers, m.UnknownOldest, m.RestrictedRefusals, m.DeliveryPruned} {
+	for _, c := range []prometheus.Collector{m.Requests, m.Claims, m.Submissions, m.LeaseOverruns, m.OverdueRetries, m.OutboxOldest, m.Forwarded, m.ForwardFailures, m.ConfigGeneration, m.ConfigRejections, m.ConfigRotations, m.DrainSeconds, m.ForcedStop, m.PoolAcquired, m.PoolTotal, m.DispatchQueries, m.GrantTransitions, m.CallTransitions, m.EventProjections, m.UnknownCalls, m.RestrictedServers, m.UnknownOldest, m.RestrictedRefusals, m.DeliveryPruned, m.RevocationSeconds} {
 		reg.MustRegister(c)
 	}
 	return m
