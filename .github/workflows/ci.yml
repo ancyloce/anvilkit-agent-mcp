@@ -17,7 +17,7 @@ env:
   # the migrations this repository's tests apply (MIG-02: pinned, never the
   # parent's moving default branch; bump it with every migration the
   # service starts to depend on).
-  PARENT_REF: a8d293682bce1fc8d0a20cc475c7f4b3ddad3e0a
+  PARENT_REF: 4f09188a22da1ff1674dbb26606aca022b4d2fbe
   GOWORK: "off"
   GOFLAGS: "-mod=readonly"
   ANVILKIT_MCP_MIGRATIONS_DIR: ${{ github.workspace }}/parent/jobs/migration/internal/migrate/sql/mcp
