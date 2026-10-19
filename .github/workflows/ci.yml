@@ -33,7 +33,11 @@ jobs:
           repository: ancyloce/anvilkit-services
           ref: ${{ env.PARENT_REF }}
           path: parent
-          sparse-checkout: jobs/migration/internal/migrate/sql/mcp
+          # The schema and its DEVELOPMENT_ONLY fixture set (the local-check
+          # task kind the tests insert), which internal/testdb applies after it.
+          sparse-checkout: |
+            jobs/migration/internal/migrate/sql/mcp
+            jobs/migration/internal/migrate/sql/mcp-development
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.27.0"
@@ -50,7 +54,11 @@ jobs:
           repository: ancyloce/anvilkit-services
           ref: ${{ env.PARENT_REF }}
           path: parent
-          sparse-checkout: jobs/migration/internal/migrate/sql/mcp
+          # The schema and its DEVELOPMENT_ONLY fixture set (the local-check
+          # task kind the tests insert), which internal/testdb applies after it.
+          sparse-checkout: |
+            jobs/migration/internal/migrate/sql/mcp
+            jobs/migration/internal/migrate/sql/mcp-development
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.27.0"
