@@ -78,6 +78,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
 -- name: GetGrantDecisionByCommand :one
 SELECT * FROM grant_decisions WHERE tenant_id = $1 AND command_id = $2 AND decision = $3;
 
+-- name: GetRevocationRequest :one
+-- P3.6 (platform.md SLO row 3): when a grant revision's revocation
+-- committed (its first revoke decision; a repeated command adds later
+-- ones) and the asking transaction's time, both on the database clock.
+SELECT min(decided_at)::timestamptz AS requested_at, now()::timestamptz AS observed_at
+FROM grant_decisions WHERE grant_id = $1 AND to_revision = $2 AND decision = 'revoke';
+
 -- name: ListGrants :many
 SELECT * FROM grants
 WHERE tenant_id = $1 AND (sqlc.arg(state)::text = '' OR state = sqlc.arg(state)::text)

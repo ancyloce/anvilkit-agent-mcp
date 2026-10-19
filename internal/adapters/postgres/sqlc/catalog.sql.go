@@ -393,6 +393,31 @@ func (q *Queries) GetRefresh(ctx context.Context, arg GetRefreshParams) (Catalog
 	return i, err
 }
 
+const getRevocationRequest = `-- name: GetRevocationRequest :one
+SELECT min(decided_at)::timestamptz AS requested_at, now()::timestamptz AS observed_at
+FROM grant_decisions WHERE grant_id = $1 AND to_revision = $2 AND decision = 'revoke'
+`
+
+type GetRevocationRequestParams struct {
+	GrantID    string
+	ToRevision int64
+}
+
+type GetRevocationRequestRow struct {
+	RequestedAt pgtype.Timestamptz
+	ObservedAt  pgtype.Timestamptz
+}
+
+// P3.6 (platform.md SLO row 3): when a grant revision's revocation
+// committed (its first revoke decision; a repeated command adds later
+// ones) and the asking transaction's time, both on the database clock.
+func (q *Queries) GetRevocationRequest(ctx context.Context, arg GetRevocationRequestParams) (GetRevocationRequestRow, error) {
+	row := q.db.QueryRow(ctx, getRevocationRequest, arg.GrantID, arg.ToRevision)
+	var i GetRevocationRequestRow
+	err := row.Scan(&i.RequestedAt, &i.ObservedAt)
+	return i, err
+}
+
 const getServer = `-- name: GetServer :one
 SELECT server_id, tenant_id, canonical_resource, transport, current_revision, created_at FROM servers WHERE server_id = $1
 `
