@@ -6,7 +6,7 @@
 # private or local module proxy. The anvilkit_mcp migrations are applied by
 # the parent repository's migration Job (jobs/migration) until MCP owns them;
 # this image never runs DDL.
-FROM golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS build
+FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GONOSUMDB=
 ENV GOWORK=off GOFLAGS=-mod=readonly CGO_ENABLED=0 GOPROXY=$GOPROXY GONOSUMDB=$GONOSUMDB
@@ -23,7 +23,7 @@ RUN go build -trimpath -ldflags="-s -w" -o /out/anvilkit-agent-mcp ./cmd/anvilki
 # configuration generation) arrive through the allowlisted ANVILKIT_MCP_*
 # environment; the file itself may be replaced by mounting one at the path
 # named by ANVILKIT_MCP_CONFIG.
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 COPY --from=build /out/anvilkit-agent-mcp /usr/local/bin/anvilkit-agent-mcp
 COPY config.yaml /etc/anvilkit/anvilkit-agent-mcp/config.yaml
 ENV ANVILKIT_MCP_CONFIG=/etc/anvilkit/anvilkit-agent-mcp/config.yaml
