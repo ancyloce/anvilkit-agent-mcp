@@ -1,6 +1,7 @@
 package identity_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -340,7 +341,13 @@ func TestHTTPTransportFollowsRotation(t *testing.T) {
 				return
 			}
 			go func() {
-				_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+				// Read the request first: closing a connection with unread
+				// received bytes sends a TCP reset instead of a FIN, which the
+				// client can see before the response (the intermittent
+				// "connection reset by peer" under load).
+				if _, err := http.ReadRequest(bufio.NewReader(c)); err == nil {
+					_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+				}
 				c.Close()
 			}()
 		}
