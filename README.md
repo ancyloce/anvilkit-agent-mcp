@@ -31,5 +31,5 @@ Domain and outbox writes commit or roll back together; an earlier allocated but 
 The generated contract consumers are an explicit versioned dependency, never a sibling checkout or a replace directive; the pin is the generated line below (read from the manifest by the parent's `tools/docs-status.py`, checked by its `tools/check-docs.py`).
 
 <!-- generated:contracts -->
-Contracts: this build requires `github.com/ancyloce/anvilkit-agent-contracts/go v0.1.15` (`go.mod`; tag `go/v0.1.15`).
+Contracts: this build requires `github.com/ancyloce/anvilkit-agent-contracts/go v0.1.16` (`go.mod`; tag `go/v0.1.16`).
 <!-- /generated:contracts -->

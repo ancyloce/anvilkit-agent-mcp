@@ -26,6 +26,8 @@ github.com/ancyloce/anvilkit-agent-contracts/go v0.1.14 h1:hEVomXCk47LvMoIrTzL5e
 github.com/ancyloce/anvilkit-agent-contracts/go v0.1.14/go.mod h1:GpREiampo5pSy0+IsLQcbA+DVi6jwpweI3ojWuv/gs4=
 github.com/ancyloce/anvilkit-agent-contracts/go v0.1.15 h1:Wh7f66AOUwbcklzOrk1cbkUd+V6rnU32e8Dk8liyHnU=
 github.com/ancyloce/anvilkit-agent-contracts/go v0.1.15/go.mod h1:GpREiampo5pSy0+IsLQcbA+DVi6jwpweI3ojWuv/gs4=
+github.com/ancyloce/anvilkit-agent-contracts/go v0.1.16 h1:v0W5TcsYI/mKi6Zgheft3fUI2SlWZUIqC6ljS+7xIRo=
+github.com/ancyloce/anvilkit-agent-contracts/go v0.1.16/go.mod h1:GpREiampo5pSy0+IsLQcbA+DVi6jwpweI3ojWuv/gs4=
 github.com/antlr4-go/antlr/v4 v4.13.1 h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=
 github.com/antlr4-go/antlr/v4 v4.13.1/go.mod h1:GKmUxMtwp6ZgGwZSva4eWPC5mS6vUAmOABFgjdkM7Nw=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
