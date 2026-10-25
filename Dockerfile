@@ -6,7 +6,7 @@
 # private or local module proxy. The anvilkit_mcp migrations are applied by
 # the parent repository's migration Job (jobs/migration) until MCP owns them;
 # this image never runs DDL.
-FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS build
+FROM golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS build
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GONOSUMDB=
 ENV GOWORK=off GOFLAGS=-mod=readonly CGO_ENABLED=0 GOPROXY=$GOPROXY GONOSUMDB=$GONOSUMDB
