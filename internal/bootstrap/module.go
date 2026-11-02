@@ -1,10 +1,11 @@
 // Package bootstrap assembles MCP with Fx (A08): the first configuration
 // generation, logging, metrics, the generation-owned pool and forwarder,
-// the owner use case, the gRPC transport, the lease sweeper and the
-// generation watcher. Constructors only assemble; OnStart binds, probes and
-// serves in dependency order and unwinds on failure; OnStop withdraws
-// readiness, drains the server, stops the loops and closes dependencies
-// last (DD-09 §3).
+// the use cases (background tasks, catalog, grants, tool calls, catalog
+// refresh, credential projection), the Control and ContextForge clients,
+// the gRPC transport and the background loops (see run). Constructors only
+// assemble; OnStart binds, probes and serves in dependency order and
+// unwinds on failure; OnStop withdraws readiness, drains the server, stops
+// the loops and closes dependencies last (DD-09 §3).
 package bootstrap
 
 import (
@@ -250,8 +251,9 @@ func loadCredentials(path string) ([]upstream.Credential, error) {
 	return out, nil
 }
 
-// noToolDispatch is the placement-less Control: AdmitTool never answers, so
-// accepted calls stay accepted and nothing is ever sent.
+// noToolDispatch is the placement-less Control: CheckExecution never
+// answers, so no new call is recorded, and AdmitTool never answers, so a
+// call already accepted stays accepted; nothing is ever sent.
 type noToolDispatch struct{}
 
 func (noToolDispatch) CheckExecution(context.Context, application.Scope, string, string, string) (application.ExecutionDecision, error) {
@@ -331,9 +333,11 @@ func guardedDiscoveryClient(gen config.Generation, eg *egress) *http.Client {
 }
 
 // run orders the lifecycle: health listener, gRPC bind, generation
-// activation (pool published, forwarder started), sweeper and watcher,
-// then serving; stop in reverse with bounded drains and the generation's
-// dependencies closed last.
+// activation (pool published, forwarder started), the schema check, the
+// loops (lease sweeper, generation watcher, grant-barrier and tool-call
+// reconcilers, delivery retention, catalog refresh producer), then
+// serving; stop in reverse with bounded drains (the detached tool sends
+// within the send bound) and the generation's dependencies closed last.
 func run(lc fx.Lifecycle, gen config.Generation, rt *runtime, gens *Generations, tasks *application.Tasks, grants *application.Grants, calls *application.Calls, refresh *application.Refresh, srv *grpctransport.Server, health *Health, metrics *application.Metrics, log *slog.Logger) {
 	cfg := gen.Config
 	health.valid = tasks.Ready

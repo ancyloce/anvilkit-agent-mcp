@@ -38,8 +38,9 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return s
 }
 
-// Pool is the active generation's pool (the forwarder subscriber and the
-// metrics reader take it at construction of their generation).
+// Pool is the active generation's pool, read at every use (transactions,
+// queries, the pool gauges, the retention pass and the schema check), so a
+// Swap reaches them all; a generation's forwarder is bound to its own pool.
 func (s *Store) Pool() *pgxpool.Pool { return s.current.Load() }
 
 // Swap publishes the pool of a new generation and returns the previous one

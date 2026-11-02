@@ -13,8 +13,9 @@ import (
 
 // Health is the plaintext probe and metrics listener: /healthz answers 200
 // while the process runs, /readyz 200 only while the gRPC listener serves,
-// the schema is at or above the binary's minimum and no shutdown has
-// started, /metrics the Prometheus exposition. It is
+// the schema is at or above the binary's minimum, the active configuration
+// generation has not expired and no shutdown has started, /metrics the
+// Prometheus exposition. It is
 // the first listener up and the last down so a scrape during the drain
 // still sees the shutdown gauges.
 type Health struct {

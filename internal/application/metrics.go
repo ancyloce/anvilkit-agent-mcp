@@ -4,12 +4,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Metrics are the lane's Prometheus signals (DD-09 §6): request counts by
-// state, claim and submission outcomes, lease overruns, the oldest
-// unforwarded outbox message, inbox duplicates seen by the owner's relay,
-// forwarder counters, the configuration generation and the shutdown
-// drain. Labels are controlled vocabularies; no identifier or body is a
-// label value.
+// Metrics are MCP's Prometheus signals (DD-09 §6; the fields below): the
+// background lane (request counts by state, claim and submission outcomes,
+// lease overruns, original-dispatch queries), the outbox forwarder, the
+// configuration generation, the shutdown drain, the database pool, grant
+// and tool-call transitions, the credential projection, delivery retention
+// and the revocation barrier. Labels are controlled vocabularies; no
+// identifier or body is a label value.
 type Metrics struct {
 	Requests         *prometheus.GaugeVec
 	Claims           *prometheus.CounterVec

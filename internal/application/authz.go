@@ -12,7 +12,8 @@ import (
 
 // Local marketplace authorization (A13, DD-08 §1): Casbin evaluates MCP's
 // own rules only — which tenant role may discover, review, disable, read
-// review-pending revisions, and create or revoke grants. Business
+// review-pending revisions, create, revoke or read every grant, and
+// reconcile a call (authzPolicies). Business
 // authorization stays with Pagix and final effect admission with Control.
 // The model and its policies are reviewed code; role bindings arrive from
 // a mounted file (DEVELOPMENT_ONLY until the IdP's groups are the source,
@@ -20,7 +21,8 @@ import (
 // never holds both in a tenant, so the identity that approves a server's
 // behavior never also hands out access to it.
 
-// Actions checked by the transport before any use case runs.
+// Actions the use cases check: Require before a command changes anything,
+// Allowed for what a read may show.
 const (
 	ActCatalogDiscover    = "catalog.discover"
 	ActCatalogReview      = "catalog.review"
@@ -29,8 +31,8 @@ const (
 	ActGrantCreate        = "grant.create"
 	ActGrantRevoke        = "grant.revoke"
 	ActGrantReadAll       = "grant.read_all"
-	// ActCallReconcile: the operator reconciliation of one call (P1.2,
-	// exposed through the API's operator surface since P2.5).
+	// ActCallReconcile: the operator reconciliation of one call (P1.2),
+	// through the API's operator surface (P2.5).
 	ActCallReconcile = "call.reconcile"
 )
 

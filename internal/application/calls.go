@@ -211,8 +211,9 @@ type Calls struct {
 	inflight sync.WaitGroup
 	liveMu   sync.Mutex
 	live     map[string]struct{}
-	// nextResolve throttles the Control queries of operator-pending UNKNOWN
-	// calls per call id (pruned to the rows the last pass saw).
+	// resolveMu guards nextResolve, which throttles the Control queries of
+	// operator-pending UNKNOWN calls per call id (pruned to the rows the last
+	// pass saw).
 	resolveMu   sync.Mutex
 	nextResolve map[string]time.Time
 }
@@ -835,10 +836,12 @@ func (c *Calls) ReconcileCallAs(ctx context.Context, scope Scope, callID string)
 }
 
 // ReconcileCall is the operator path (`anvilkit-agent-mcp reconcile
-// <callId>`): the call is advanced now under its original identity, an
-// UNKNOWN call by Control's current record of its original dispatch —
-// which, once Control resolved that identity, clears the RECOVERY_RESTRICTED
-// hold on the server. It never sends.
+// <callId>`): the call is advanced now under its original identity — a
+// marked call without an outcome is recorded UNKNOWN, an unobserved outcome
+// is reported, and an UNKNOWN call is settled by Control's current record of
+// its original dispatch, which, once Control resolved that identity, clears
+// the RECOVERY_RESTRICTED hold on the server. Accepted and admitted calls
+// are left to the reconciler. It never sends.
 func (c *Calls) ReconcileCall(ctx context.Context, callID string) (domain.Call, error) {
 	q := c.store.Queries()
 	call, err := c.load(ctx, q, callID)

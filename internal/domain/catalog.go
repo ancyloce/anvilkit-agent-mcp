@@ -39,7 +39,7 @@ var (
 	ErrInvalidTransition  = errors.New("INVALID_TRANSITION")
 )
 
-// DataClass orders the classes a descriptor or grant may carry.
+// dataClasses orders the classes a descriptor or grant may carry.
 var dataClasses = []string{"public", "internal", "confidential", "restricted"}
 
 // DataClassRank is the order of a data class, -1 when unknown.
@@ -225,8 +225,8 @@ func digestJSON(v any) (string, error) {
 
 // CheckResource validates the canonical resource of a streamable-http
 // server: an absolute https URL (http only for DEVELOPMENT_ONLY hosts the
-// caller allows), no userinfo, no fragment. The host is returned for the
-// network checks of the connection layer.
+// caller allows), no userinfo, query or fragment. The host is returned for
+// the network checks of the connection layer.
 func CheckResource(raw string, allowHTTP bool) (host string, err error) {
 	u, err := url.Parse(raw)
 	if err != nil || !u.IsAbs() || u.Host == "" || u.Opaque != "" {
@@ -249,10 +249,10 @@ func CheckResource(raw string, allowHTTP bool) (host string, err error) {
 
 // BuildDescriptor binds the live retrieval to the declaration. It refuses a
 // transport the baseline does not qualify (discovery never launches a stdio
-// package), a protocol version other than the declared one, a method set
-// that differs, schema digests that differ from the declared expectations,
-// a network scope that omits the resource's own host, and a digest other
-// than the expected one.
+// package), an unknown data class, a protocol version other than the
+// declared one, a method set that differs, schema digests that differ from
+// the declared expectations and a digest other than the expected one. A
+// network scope that omits the resource's own host gains it.
 func BuildDescriptor(d Declaration, live LiveServer) (Descriptor, error) {
 	if d.Transport != "streamable-http" {
 		return Descriptor{}, fmt.Errorf("%w: transport %s is not discoverable (stdio servers run only as qualified Jobs)", ErrForbidden, d.Transport)
@@ -347,8 +347,8 @@ func BuildDescriptor(d Declaration, live LiveServer) (Descriptor, error) {
 // DescriptorDigest covers everything a reviewer approves: resource,
 // transport, protocol, server identity, every method's schemas,
 // annotations and declarations, resources, prompts, data class, network
-// scope and licenses. Provenance and the retrieval evidence are recorded
-// but do not change what executes.
+// scope, licenses and the issuer. Provenance and the retrieval evidence
+// are recorded but do not change what executes.
 func DescriptorDigest(d Descriptor) (string, error) {
 	return digestJSON(map[string]any{
 		"schema": "mcp-descriptor-v1", "canonicalResource": d.CanonicalResource, "transport": d.Transport, "protocolVersion": d.ProtocolVersion,

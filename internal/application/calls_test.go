@@ -476,7 +476,7 @@ func TestCalls(t *testing.T) {
 	})
 
 	t.Run("P1.2: sixty unresolvable UNKNOWN rows do not starve the reconciler; a newly resolved row settles within two passes", func(t *testing.T) {
-		// Sixty operator-pending rows older than the batch (50), all unknown at
+		// Sixty operator-pending rows (more than the batch of 50), all unknown at
 		// Control (the fake answers "unknown" for dispatch ids it never issued);
 		// they belong to another tenant so the restriction they carry does not
 		// fall on tenant_a's server.

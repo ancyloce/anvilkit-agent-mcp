@@ -1,9 +1,12 @@
-// Package application executes the owner's background-task commands (DD-09
-// §1) inside one transaction each: the domain decision under the row lock
-// of the generation, the attempt record, the CAS update and the outbox
-// event through the same pgx.Tx. No network, queue or NATS I/O happens
-// while a row is locked; the original-dispatch query of an external-effect
-// lease runs before the transaction that consumes its answer.
+// Package application holds MCP's use cases: the owner's background-task
+// commands (DD-09 §1), the private catalog, grants and guarded tool calls
+// (DD-08), the catalog refresh and the credential projection. Each
+// background-task command runs inside one transaction: the domain decision
+// under the row lock of the generation, the attempt record, the CAS update
+// and the outbox event through the same pgx.Tx. No network, queue or NATS
+// I/O happens while a row is locked; the original-dispatch query of an
+// external-effect lease runs before the transaction that consumes its
+// answer.
 package application
 
 import (
@@ -105,8 +108,8 @@ func (t *Tasks) admitConfiguration() error {
 }
 
 // RequestInput is a new durable request (an owner-internal command: the
-// catalog lifecycle of P18 and the DEVELOPMENT_ONLY local-check entry
-// point create them; there is no public create RPC).
+// catalog refresh producer, Refresh.Schedule, and the DEVELOPMENT_ONLY
+// local-check entry point create them; there is no public create RPC).
 type RequestInput struct {
 	TaskID           string
 	TenantID         string
@@ -203,7 +206,7 @@ func attemptOutcomeIfLeased(prev domain.Task, outcome string) string {
 
 // apply writes a decided row (CAS on the read revision) and records the
 // current attempt's outcome when one is given. A terminal row is its own
-// completion record (background.completed left the catalog in P2.8).
+// completion record (there is no background.completed event, P2.8).
 func (t *Tasks) apply(ctx context.Context, tx postgres.Tx, task domain.Task, readRevision uint64, now time.Time, attemptOutcome string) error {
 	n, err := tx.Q.UpdateRequest(ctx, postgres.UpdateParams(task, readRevision, now))
 	if err != nil {
@@ -475,7 +478,8 @@ func (t *Tasks) SweepExpired(ctx context.Context, limit int32) (int, error) {
 }
 
 // Observe refreshes the gauges the sweeper owns (request counts, overdue
-// retries, the oldest unforwarded outbox message).
+// retries, the oldest unforwarded outbox message, the UNKNOWN tool calls
+// and the pool's connections).
 func (t *Tasks) Observe(ctx context.Context, consumerGroup string) {
 	q := t.store.Queries()
 	if counts, err := q.CountRequestsByState(ctx); err == nil {

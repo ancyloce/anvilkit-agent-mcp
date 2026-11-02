@@ -1,7 +1,9 @@
-// Package grpc is MCP's grpc-go transport (A03) for the owner surfaces of
-// P14: BackgroundTaskService. Requests are validated by protovalidate
-// before any handler runs; domain errors map to the public codes of
-// contracts.md §4. Under an Identity the listener is mTLS-only and every
+// Package grpc is MCP's grpc-go transport (A03): BackgroundTaskService
+// (P14), CatalogService and GrantService (P18), CallService (P19) and
+// CatalogRefreshService (P2.5), the last four registered only when their
+// use cases are given. Requests are validated by protovalidate before any
+// handler runs; domain errors map to the public codes of contracts.md §4.
+// Under an Identity the listener is mTLS-only and every
 // RPC is authorized by the peer's workload identity (P0.1); without one it
 // is the DEVELOPMENT_ONLY plaintext listener that authorizes nothing.
 package grpc
@@ -68,7 +70,6 @@ func NewServer(listen string, capacity int, tasks Tasks, catalog *application.Ca
 	return NewServerWithIdentity(listen, nil, capacity, tasks, catalog, grants, calls)
 }
 
-// NewServerWithIdentity is NewServer with the listener identity.
 // Option adds an optional service to the server.
 type Option func(*options)
 
@@ -77,6 +78,8 @@ type options struct{ refresh *application.Refresh }
 // WithRefresh registers CatalogRefreshService (P2.5).
 func WithRefresh(r *application.Refresh) Option { return func(o *options) { o.refresh = r } }
 
+// NewServerWithIdentity is NewServer with the listener identity and the
+// optional services of extra.
 func NewServerWithIdentity(listen string, id *Identity, capacity int, tasks Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls, extra ...Option) (*Server, error) {
 	var o options
 	for _, f := range extra {

@@ -9,8 +9,8 @@ import (
 )
 
 // Producer and subjects of this owner (architecture.md naming, event
-// catalog). background.completed was removed from the catalog in P2.8 (no
-// consumer: the owner's own records are its completion projection).
+// catalog). There is no background.completed subject (P2.8: no consumer;
+// the owner's own records are its completion projection).
 const (
 	Producer                   = "anvilkit-agent-mcp"
 	SubjectBackgroundRequested = "anvilkit.mcp.background.requested"

@@ -149,8 +149,8 @@ func TestRequestCommitsWithOutboxOrNotAtAll(t *testing.T) {
 	require.ErrorIs(t, err, application.ErrForbidden)
 
 	// New input supersedes: the old generation is stale, the new one pending
-	// with its own background.requested (background.completed left the
-	// catalog in P2.8: no completion event is published).
+	// with its own background.requested (no completion event is published,
+	// P2.8).
 	next := h.request(t, "task_1", "hello-2")
 	require.Equal(t, uint64(2), next.Generation)
 	old, err := h.store.Queries().GetRequest(ctx, struct {

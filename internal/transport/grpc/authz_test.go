@@ -54,7 +54,8 @@ func reloader(t *testing.T, dir string) *identity.Reloader {
 // TestPolicyCoversEveryRegisteredMethod (P0.1 AC2): the server refuses to
 // construct under an mTLS identity unless every registered RPC has an
 // allowlist entry; the entries of services this build does not register
-// (Catalog, Grant, Call without their use cases) are not stale.
+// (Catalog, Grant, Call and CatalogRefresh without their use cases) are not
+// stale.
 func TestPolicyCoversEveryRegisteredMethod(t *testing.T) {
 	ca := identitytest.NewCA(t, "ca")
 	r := reloader(t, mount(t, ca, "anvilkit-agent-mcp", []string{identitytest.SPIFFE(td, "anvilkit-apps", "anvilkit-agent-mcp")}))

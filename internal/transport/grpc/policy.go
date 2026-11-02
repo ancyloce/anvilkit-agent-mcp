@@ -18,9 +18,10 @@ var (
 )
 
 // Policy is the method→principal allowlist of every RPC MCP can register.
-// Catalog, Grant and Call services are registered only when their use
-// cases exist; registeredOnly drops the entries of absent services so that
-// the Authorizer's completeness check holds exactly for this build.
+// Catalog, Grant, Call and CatalogRefresh services are registered only when
+// their use cases exist; registeredOnly drops the entries of absent
+// services so that the Authorizer's completeness check holds exactly for
+// this build.
 func Policy() identity.Policy {
 	p := identity.Policy{}
 	add := func(service string, methods []string, allowed ...identity.Workload) {

@@ -40,7 +40,8 @@ const (
 	DefaultConfigFile = "config.yaml"
 )
 
-// GRPC is the internal listener (BackgroundTaskService) and its bounds.
+// GRPC is the internal listener (MCP's gRPC services, transport/grpc) and
+// its bounds.
 type GRPC struct {
 	Listen          string        `koanf:"listen"`
 	Capacity        int           `koanf:"capacity"`
@@ -113,8 +114,8 @@ type Database struct {
 
 // Tasks are the owner's reviewed bounds of the background lane
 // (DEVELOPMENT_ONLY values until ENV-05 fixes them): the input bound of a
-// ClaimTaskResponse, the longest lease, the retry delay and bound, the
-// lease sweep interval and the reconstruction age the relay uses.
+// ClaimTaskResponse, the longest lease, the retry delay and bound, and the
+// lease sweep interval.
 type Tasks struct {
 	MaxInputBytes int           `koanf:"max_input_bytes"`
 	MaxLease      time.Duration `koanf:"max_lease"`
@@ -174,9 +175,10 @@ const (
 	NATSCredsNKey = "nkey"
 )
 
-// Control is the placement of the original-dispatch query for
-// external-effect leases (DD-09 §1); without an address the owner has no
-// evidence and never reassigns such a lease.
+// Control is the placement of MCP's Control clients: the original-dispatch
+// query for external-effect leases (DD-09 §1), the grant barrier and tool
+// call admission. Without an address the owner has no evidence and never
+// reassigns such a lease, grants stay PENDING and no tool call is admitted.
 type Control struct {
 	Address  string         `koanf:"address"`
 	Timeout  time.Duration  `koanf:"timeout"`
@@ -198,9 +200,9 @@ const (
 	ApolloModeSnapshot = "snapshot"
 )
 
-// Reload governs the generation watcher: how often the secret file and the
-// snapshot are re-read and how long a drained generation's clients may
-// take to close.
+// Reload governs the generation watcher: how often the reviewed file, the
+// mounted secret files and the snapshot are re-read and how long a drained
+// generation's clients may take to close.
 type Reload struct {
 	Interval   time.Duration `koanf:"interval"`
 	DrainLimit time.Duration `koanf:"drain_limit"`
@@ -211,8 +213,9 @@ type Reload struct {
 // the reviewed discovery allowlist (exact hosts or ".suffix" patterns), the
 // DEVELOPMENT_ONLY private hosts that may use http and resolve to private
 // addresses, and the mounted role bindings file (DEVELOPMENT_ONLY until
-// IdP groups are the source). Without a ContextForge placement nothing is
-// discovered.
+// IdP groups are the source). Without a ContextForge placement only the
+// resources with a reviewed upstream credential (calls.credentials_file)
+// are discovered, through MCP's own guarded egress.
 type Catalog struct {
 	ContextForge ContextForge `koanf:"contextforge"`
 	AllowedHosts []string     `koanf:"allowed_hosts"`

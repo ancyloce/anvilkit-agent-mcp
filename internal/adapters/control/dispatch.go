@@ -1,7 +1,10 @@
-// Package control is the owner's client of Control's DispatchService for
-// the original-dispatch query of an expired external-effect lease (DD-02
-// §4, DD-09 §1). Only CONFIRMED_NOT_SENT or DENIED release the lease;
-// every other state, answer or error leaves it unreleased.
+// Package control is MCP's client of Control: DispatchService for the
+// original-dispatch query of an expired external-effect lease (DD-02 §4,
+// DD-09 §1) and for tool dispatches (AdmitTool, ObserveDispatch,
+// GetDispatch), AuthorizationService for the execution check, and
+// GrantPolicyService for the grant barrier (PolicyClient). For a lease,
+// only CONFIRMED_NOT_SENT or DENIED release it; every other state, answer
+// or error leaves it unreleased.
 package control
 
 import (

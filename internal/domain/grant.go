@@ -202,7 +202,8 @@ func digestLines(prefix string, lines []string) string {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
-// PolicyDigest is the digest Control registers for this grant revision.
+// ComputePolicyDigest is the digest Control registers for this grant
+// revision (stored as PolicyDigest).
 func (g Grant) ComputePolicyDigest() string {
 	return digestLines("mcp-grant-policy-v1", g.dimensions())
 }

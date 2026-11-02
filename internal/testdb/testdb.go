@@ -158,7 +158,8 @@ func (i *Instance) Pool(t *testing.T) *pgxpool.Pool {
 }
 
 // Admin runs statements as the database owner (test fixtures: grants,
-// descriptors, servers; the P18 lifecycle will write them for real).
+// descriptors and servers, which the catalog and grant use cases otherwise
+// write).
 func (i *Instance) Admin(t *testing.T, statements ...string) {
 	t.Helper()
 	ctx := context.Background()

@@ -73,10 +73,12 @@ const (
 	FailureHandler              = "HANDLER_FAILED"
 )
 
-// The task kinds this owner's schema admits (migration 00002) and the
-// fixture kind of the background lane. local-check is DEVELOPMENT_ONLY
-// fixed computation: it qualifies claims, acceptance, relays and the
-// Worker without any business handler.
+// The task kinds of this owner. The production schema admits
+// mcp-catalog-refresh only (migration 00005); local-check, the fixture kind
+// of the background lane, is re-admitted by the DEVELOPMENT_ONLY fixture
+// set (mcp-development 00001). local-check is DEVELOPMENT_ONLY fixed
+// computation: it qualifies claims, acceptance, relays and the Worker
+// without any business handler.
 const (
 	KindCatalogRefresh = "mcp-catalog-refresh"
 	KindLocalCheck     = "local-check"
@@ -515,8 +517,8 @@ func DecideCancel(t Task) (task Task, attemptOutcome string, changed bool) {
 }
 
 // DispatchOutcome is Control's answer about the original dispatch of an
-// external-effect attempt (DD-02 §4): only NotSent evidence releases the
-// lease for reassignment.
+// external-effect attempt (DD-02 §4): only DispatchNotSent evidence
+// releases the lease for reassignment.
 type DispatchOutcome int
 
 const (

@@ -17,10 +17,11 @@ import (
 )
 
 // startTracing installs the process's tracer provider from the first
-// generation: spans go over OTLP/gRPC to the placed collector (plaintext,
-// under telemetry.otlp_tls, plaintext only with the development guard) or nowhere. The gRPC server
-// and Control client stats handlers use it through the global provider; the
-// stop hook flushes within the stop deadline.
+// generation: spans go over OTLP/gRPC to the placed collector (under
+// telemetry.otlp_tls: tls or mtls, plaintext only with the development
+// guard) or nowhere. The gRPC server and Control client stats handlers use
+// it through the global provider; the stop hook flushes within the stop
+// deadline.
 func startTracing(lc fx.Lifecycle, gen config.Generation) error {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	if gen.Config.Telemetry.OTLPEndpoint == "" {

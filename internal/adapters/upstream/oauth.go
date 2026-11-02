@@ -168,9 +168,10 @@ func (a *Authority) checkURL(ctx context.Context, raw string) error {
 
 // Token returns the access token for a call under grant g, or "" when the
 // grant binds no issuer (an unprotected server). Every call re-reads the
-// resource's metadata: it must still name the grant's resource and issuer,
-// and the issuer's metadata must still identify that issuer with token and
-// JWKS endpoints inside the policy.
+// resource's metadata: it must still name the grant's resource and issuer.
+// A token request (no cached token valid for 30 more seconds) also re-reads
+// the issuer's metadata, which must still identify that issuer with token
+// and JWKS endpoints inside the policy.
 func (a *Authority) Token(ctx context.Context, g domain.Grant) (string, error) {
 	if g.Issuer == "" {
 		return "", nil
