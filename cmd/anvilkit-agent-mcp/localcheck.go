@@ -1,7 +1,7 @@
 //go:build localcheck
 
-// The DEVELOPMENT_ONLY `local-check` subcommands (P14, behind the
-// localcheck build tag since P2.5): the owner entry point that creates,
+// The DEVELOPMENT_ONLY `local-check` subcommands (P14; built only under the
+// localcheck build tag, P2.5): the owner entry point that creates,
 // cancels and reads requests of the fixture kind through the same
 // application code and transactions the service uses. The production schema
 // refuses the fixture kind; the development foundation's migration applies

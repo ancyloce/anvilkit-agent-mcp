@@ -2,8 +2,10 @@
 # secret-free, placement-free part of a configuration generation. Precedence
 # is defaults < this file < a validated Apollo snapshot (non-secret keys,
 # ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE with apollo.mode: snapshot) < the
-# allowlisted environment: ANVILKIT_MCP_LISTEN, ANVILKIT_MCP_HEALTH_LISTEN,
+# allowlisted environment (the complete set: envOverrides in
+# internal/config/config.go): ANVILKIT_MCP_LISTEN, ANVILKIT_MCP_HEALTH_LISTEN,
 # ANVILKIT_MCP_IDENTITY_{CERT,KEY,CA}_FILE, ANVILKIT_MCP_IDENTITY_TRUST_DOMAIN,
+# ANVILKIT_MCP_TELEMETRY_OTLP_ENDPOINT,
 # ANVILKIT_MCP_DATABASE_URL or ANVILKIT_MCP_DATABASE_URL_FILE (the secret,
 # environment or mounted file only; outside development a URL with
 # sslmode=verify-full, P0.6), ANVILKIT_MCP_NATS_URL,
@@ -11,20 +13,21 @@
 # ANVILKIT_MCP_NATS_CREDS_FILE (P0.6: the publisher's NATS user, a .creds file
 # or an NKey seed, environment only; required outside development),
 # ANVILKIT_MCP_CONTROL_ADDRESS, ANVILKIT_MCP_APOLLO_SNAPSHOT_FILE,
+# ANVILKIT_MCP_CONTEXTFORGE_URL, ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE,
+# ANVILKIT_MCP_CONTEXTFORGE_CA_FILE (P2.5, the bundle that verifies an https
+# ContextForge), ANVILKIT_MCP_ROLES_FILE,
 # ANVILKIT_MCP_UPSTREAM_CREDENTIALS_FILE (P19, the mounted upstream credential
-# bindings), ANVILKIT_MCP_CONTEXTFORGE_CA_FILE (P2.5, the bundle that verifies
-# an https ContextForge). Any other
-# ANVILKIT_MCP_* variable, any unknown key here and any secret or placement
-# key here rejects the candidate before anything starts.
+# bindings). Any other ANVILKIT_MCP_* variable, any unknown key here and any
+# secret or placement key here rejects the candidate before anything starts.
 #
-# P14 scope: the BackgroundTaskService owner (claims, heartbeats, result
+# Scope: the BackgroundTaskService owner (claims, heartbeats, result
 # acceptance, lease sweep, cancellation), the transactional outbox and its
-# in-process forwarder. P18: the private catalog through the ContextForge
+# in-process forwarder; the private catalog (P18) through the ContextForge
 # connection layer (ANVILKIT_MCP_CONTEXTFORGE_URL and the mounted token
 # ANVILKIT_MCP_CONTEXTFORGE_TOKEN_FILE), the role bindings
 # (ANVILKIT_MCP_ROLES_FILE) and the grant barrier with Control
-# (ANVILKIT_MCP_CONTROL_ADDRESS). P19: guarded tool calls (calls.*); DEVELOPMENT_ONLY
-# bounds below are not production capacity.
+# (ANVILKIT_MCP_CONTROL_ADDRESS); guarded tool calls (P19, calls.*).
+# DEVELOPMENT_ONLY bounds below are not production capacity.
 # development: the top-level DEVELOPMENT_ONLY guard (P0.1). This checked-in
 # file configures host-side runs on the development foundation
 # (deploy/dev), whose NATS and OTLP collector are plaintext; every plaintext
@@ -84,8 +87,10 @@ outbox:
     tls:
       mode: development
 control:
-  # The original-dispatch query of an external-effect lease
-  # (ANVILKIT_MCP_CONTROL_ADDRESS); without it such a lease is never reassigned.
+  # Control (ANVILKIT_MCP_CONTROL_ADDRESS): the original-dispatch query of an
+  # external-effect lease, the grant barrier and tool call admission; without
+  # it such a lease is never reassigned, grants stay pending and no tool call
+  # is admitted.
   timeout: 5s
   # identity: mtls presents the workload certificate (grpc.identity's files
   # unless mtls names its own) and verifies Control by server_name;
@@ -98,8 +103,9 @@ apollo:
   mode: disabled
   app_id: anvilkit-agent-mcp
 reload:
-  # The generation watcher: re-reads the secret file and the snapshot at this
-  # interval; a replaced generation's old clients drain within drain_limit.
+  # The generation watcher: re-reads this file, the mounted secret files and
+  # the snapshot at this interval; a replaced generation's old clients drain
+  # within drain_limit.
   interval: 2s
   drain_limit: 30s
 catalog:

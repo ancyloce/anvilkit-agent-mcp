@@ -1,10 +1,10 @@
-// anvilkit-agent-mcp: the MCP service (P14 scope: the BackgroundTaskService
-// owner, the transactional outbox and its forwarder). Without arguments it
-// runs the Fx application; `reconcile <callId>` is the operator path of
-// P1.2. The DEVELOPMENT_ONLY `local-check` subcommands (the owner entry
-// point of the fixture kind) exist only in a binary built with
-// `-tags localcheck` (P2.5): the production build has no such entry and
-// refuses any other argument.
+// anvilkit-agent-mcp: the MCP service (the BackgroundTaskService owner, the
+// private catalog, grants and guarded tool calls, the transactional outbox
+// and its forwarder). Without arguments it runs the Fx application;
+// `reconcile <callId>` is the operator path of P1.2. The DEVELOPMENT_ONLY
+// `local-check` subcommands (the owner entry point of the fixture kind)
+// exist only in a binary built with `-tags localcheck` (P2.5): the
+// production build has no such entry and refuses any other argument.
 package main
 
 import (

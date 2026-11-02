@@ -54,8 +54,8 @@ jobs:
           repository: ancyloce/anvilkit-services
           ref: ${{ env.PARENT_REF }}
           path: parent
-          # The schema and its DEVELOPMENT_ONLY fixture set (the local-check
-          # task kind the tests insert), which internal/testdb applies after it.
+          # The same paths as the go job; tools/sqlc.sh reads the mcp schema
+          # only.
           sparse-checkout: |
             jobs/migration/internal/migrate/sql/mcp
             jobs/migration/internal/migrate/sql/mcp-development

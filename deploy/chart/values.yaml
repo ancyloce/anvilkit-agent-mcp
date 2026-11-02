@@ -134,10 +134,10 @@ nats:
       forwarderKey: forwarder
       relayKey: relay
 
-# The Control placement of the original-dispatch query and the grant barrier
-# (ANVILKIT_MCP_CONTROL_ADDRESS); optional. identity.mode mtls presents the
-# workload certificate and verifies Control by serverName; development is
-# plaintext (development.enabled only).
+# The Control placement of the original-dispatch query, the grant barrier
+# and tool call admission (ANVILKIT_MCP_CONTROL_ADDRESS); optional.
+# identity.mode mtls presents the workload certificate and verifies Control
+# by serverName; development is plaintext (development.enabled only).
 control:
   address: ""
   identity:
