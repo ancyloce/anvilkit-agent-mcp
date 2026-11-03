@@ -633,3 +633,61 @@ func metricValue(t *testing.T, m prometheus.Metric) float64 {
 	}
 	return out.GetGauge().GetValue()
 }
+
+// The operator reconciliation applies the reconciler's eligibility to a
+// marked call: a send still inside its bound is left to its sender, whose
+// outcome and result are stored; a marker older than the bound is recorded
+// UNKNOWN. Neither path sends.
+func TestOperatorReconcileLeavesSendsInsideTheirBound(t *testing.T) {
+	h := newCatalogHarness(t)
+	ctx := context.Background()
+	d := h.approved(t)
+	req := grantRequest(d)
+	req.Methods = []string{"search_issues", "create_issue"}
+	g, _, err := h.grants.Create(ctx, h.cmd(granter), granter, req)
+	require.NoError(t, err)
+	disp := newFakeToolDispatch()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	admin := func(stmt string, args ...any) { h.inst.Admin(t, fmt.Sprintf(stmt, args...)) }
+	hold := make(chan struct{})
+	up := &fakeUpstream{sends: map[string]int{}, hold: hold}
+	calls := application.NewCalls(h.store, disp, map[string]application.Upstream{"go-sdk": up}, &fakeTokens{},
+		[]application.QualifiedRoute{{Resource: issuesURL, ProtocolVersion: protocol, Transport: "streamable-http", Route: "go-sdk"}},
+		application.CallOptions{SendTimeout: 30 * time.Second, Wait: 200 * time.Millisecond, ReconcileAge: time.Hour, ReconcileBatch: 50}, h.clock, application.NewMetrics(prometheus.NewRegistry()), log)
+	create := func(args string) domain.Call {
+		got, _, err := calls.Create(ctx, h.cmd(agent), agent, domain.CallRequest{GrantID: g.GrantID, GrantRevision: g.Revision, Method: "create_issue", ArgumentRef: "inline",
+			ArgumentDigest: domain.DigestBytes([]byte(args)), Arguments: []byte(args), OperationID: "op_1", AttemptID: "att_1", InstanceID: "inst_1", ExecutionEpoch: 1, Deadline: time.Now().Add(time.Hour)})
+		require.NoError(t, err)
+		require.Equal(t, domain.CallSent, got.State, "the send is in flight when the wait returns")
+		return got
+	}
+
+	active := create(`{"title":"in-flight"}`)
+	kept, err := calls.ReconcileCall(ctx, active.CallID)
+	require.NoError(t, err)
+	require.Equal(t, domain.CallSent, kept.State, "a send inside its bound is not recorded UNKNOWN")
+	_, err = calls.Reconcile(ctx)
+	require.NoError(t, err)
+	close(hold)
+	require.Eventually(t, func() bool {
+		got, _ := calls.Get(ctx, agent, active.CallID)
+		return got.State == domain.CallSucceeded
+	}, 5*time.Second, 20*time.Millisecond, "the sender records its own outcome")
+	done, _ := calls.Get(ctx, agent, active.CallID)
+	require.NotEmpty(t, done.ResultDigest, "the result of the send is stored")
+
+	// A marker older than the send bound: the sender is gone.
+	hold2 := make(chan struct{})
+	up.set(func(u *fakeUpstream) { u.hold = hold2 })
+	gone := create(`{"title":"abandoned"}`)
+	admin("UPDATE tool_requests SET send_marker_at = now() - interval '1 hour' WHERE call_id = '%s'", gone.CallID)
+	unknown, err := calls.ReconcileCall(ctx, gone.CallID)
+	require.NoError(t, err)
+	require.Equal(t, domain.CallUnknown, unknown.State)
+	close(hold2)
+	time.Sleep(200 * time.Millisecond) // the late sender finds its record no longer 'sent'
+	late, _ := calls.Get(ctx, agent, gone.CallID)
+	require.Equal(t, domain.CallUnknown, late.State, "a late outcome never overwrites the recorded UNKNOWN")
+	require.Equal(t, 1, up.count(`{"title":"in-flight"}`))
+	require.Equal(t, 1, up.count(`{"title":"abandoned"}`), "reconciliation never sends")
+}

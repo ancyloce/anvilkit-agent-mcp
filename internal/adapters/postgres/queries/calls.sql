@@ -35,6 +35,15 @@ UPDATE tool_requests SET state = $2, failure_code = $3, result = $4, result_dige
     updated_at = now()
 WHERE call_id = $1 AND state = ANY(sqlc.arg(expected)::text[]);
 
+-- name: SetAbandonedToolRequestUnknown :execrows
+-- A marked call becomes UNKNOWN only once its marker is older than the send
+-- bound (sent_age_seconds, the marker age ListOpenToolRequests selects by):
+-- a sender still inside its bound records its own outcome. Both the
+-- reconciler and the operator reconciliation go through it.
+UPDATE tool_requests SET state = 'unknown', failure_code = $2, updated_at = now()
+WHERE call_id = $1 AND state = 'sent'
+  AND send_marker_at < now() - make_interval(secs => sqlc.arg(sent_age_seconds)::float8);
+
 -- name: SetToolRequestObserved :exec
 UPDATE tool_requests SET observed_at = now(), observation_sequence = observation_sequence + 1, updated_at = now()
 WHERE call_id = $1 AND observation_sequence = $2;

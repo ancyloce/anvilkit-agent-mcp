@@ -725,13 +725,9 @@ func (c *Calls) observe(ctx context.Context, call domain.Call) {
 // it); operator-pending UNKNOWN calls are asked about at ResolveInterval.
 func (c *Calls) Reconcile(ctx context.Context) (int, error) {
 	q := c.store.Queries()
-	sentAge := c.opts.SendTimeout + 5*time.Second
-	if c.opts.ReconcileAge < sentAge {
-		sentAge = c.opts.ReconcileAge
-	}
 	seen := map[string]struct{}{}
 	total := 0
-	after := sqlc.ListOpenToolRequestsParams{Limit: c.opts.ReconcileBatch, AgeSeconds: c.opts.ReconcileAge.Seconds(), SentAgeSeconds: sentAge.Seconds(),
+	after := sqlc.ListOpenToolRequestsParams{Limit: c.opts.ReconcileBatch, AgeSeconds: c.opts.ReconcileAge.Seconds(), SentAgeSeconds: c.sentAge().Seconds(),
 		AfterAt: pgtype.Timestamptz{Time: time.Time{}, Valid: true}, AfterID: ""}
 	for {
 		if ctx.Err() != nil {
@@ -766,6 +762,13 @@ func (c *Calls) Reconcile(ctx context.Context) (int, error) {
 	return total, nil
 }
 
+// sentAge is the marker age after which a marked call's sender is gone (its
+// send is bounded by SendTimeout): the eligibility of a SENT call for
+// UNKNOWN, in the reconciler's listing and in the transition itself.
+func (c *Calls) sentAge() time.Duration {
+	return min(c.opts.SendTimeout+5*time.Second, c.opts.ReconcileAge)
+}
+
 func (c *Calls) reconcileOne(ctx context.Context, q *sqlc.Queries, call domain.Call) {
 	switch call.State {
 	case domain.CallAccepted:
@@ -773,9 +776,11 @@ func (c *Calls) reconcileOne(ctx context.Context, q *sqlc.Queries, call domain.C
 	case domain.CallAdmitted:
 		c.cancel(ctx, call, domain.CallNotSent)
 	case domain.CallSent:
+		// Only past the send bound: a send still inside it keeps its sender's
+		// outcome (result included), which an earlier UNKNOWN would refuse.
 		code := domain.CallOutcomeUnknown
-		if n, err := q.SetToolRequestOutcome(ctx, sqlc.SetToolRequestOutcomeParams{CallID: call.CallID, State: string(domain.CallUnknown), FailureCode: &code,
-			Expected: []string{string(domain.CallSent)}}); err == nil && n == 1 {
+		if n, err := q.SetAbandonedToolRequestUnknown(ctx, sqlc.SetAbandonedToolRequestUnknownParams{CallID: call.CallID, FailureCode: &code,
+			SentAgeSeconds: c.sentAge().Seconds()}); err == nil && n == 1 {
 			c.count(domain.CallUnknown)
 			c.log.Warn("marked call without outcome beyond the send bound; recorded UNKNOWN", "callId", call.CallID, "serverId", call.ServerID)
 			if call, err = c.load(ctx, q, call.CallID); err == nil {
@@ -836,12 +841,14 @@ func (c *Calls) ReconcileCallAs(ctx context.Context, scope Scope, callID string)
 }
 
 // ReconcileCall is the operator path (`anvilkit-agent-mcp reconcile
-// <callId>`): the call is advanced now under its original identity — a
-// marked call without an outcome is recorded UNKNOWN, an unobserved outcome
-// is reported, and an UNKNOWN call is settled by Control's current record of
-// its original dispatch, which, once Control resolved that identity, clears
-// the RECOVERY_RESTRICTED hold on the server. Accepted and admitted calls
-// are left to the reconciler. It never sends.
+// <callId>`): the call is advanced now under its original identity with the
+// reconciler's eligibility — a marked call without an outcome is recorded
+// UNKNOWN once its send bound has passed (a send inside it is left to its
+// sender), an unobserved outcome is reported, and an UNKNOWN call is
+// settled by Control's current record of its original dispatch, which, once
+// Control resolved that identity, clears the RECOVERY_RESTRICTED hold on
+// the server. Accepted and admitted calls are left to the reconciler. It
+// never sends.
 func (c *Calls) ReconcileCall(ctx context.Context, callID string) (domain.Call, error) {
 	q := c.store.Queries()
 	call, err := c.load(ctx, q, callID)

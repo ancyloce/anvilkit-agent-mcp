@@ -381,6 +381,30 @@ func (q *Queries) ListOpenToolRequests(ctx context.Context, arg ListOpenToolRequ
 	return items, nil
 }
 
+const setAbandonedToolRequestUnknown = `-- name: SetAbandonedToolRequestUnknown :execrows
+UPDATE tool_requests SET state = 'unknown', failure_code = $2, updated_at = now()
+WHERE call_id = $1 AND state = 'sent'
+  AND send_marker_at < now() - make_interval(secs => $3::float8)
+`
+
+type SetAbandonedToolRequestUnknownParams struct {
+	CallID         string
+	FailureCode    *string
+	SentAgeSeconds float64
+}
+
+// A marked call becomes UNKNOWN only once its marker is older than the send
+// bound (sent_age_seconds, the marker age ListOpenToolRequests selects by):
+// a sender still inside its bound records its own outcome. Both the
+// reconciler and the operator reconciliation go through it.
+func (q *Queries) SetAbandonedToolRequestUnknown(ctx context.Context, arg SetAbandonedToolRequestUnknownParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setAbandonedToolRequestUnknown, arg.CallID, arg.FailureCode, arg.SentAgeSeconds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setToolRequestAdmission = `-- name: SetToolRequestAdmission :execrows
 UPDATE tool_requests SET state = $2, control_dispatch_id = $3, failure_code = $4, updated_at = now()
 WHERE call_id = $1 AND state = 'accepted'
