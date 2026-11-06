@@ -71,14 +71,27 @@ jobs:
       - run: docker build -t anvilkit-agent-mcp:ci .
   chart:
     runs-on: ubuntu-24.04
+    env:
+      # A production-shaped render (development.enabled false); RB-S10: outside
+      # development every image is pinned by digest.
+      CHART_SETS: >-
+        --set database.secret.name=mcp-database --set nats.url=tls://nats:4222 --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer --set nats.tls.caSecret.name=nats-ca
+        --set relay.database.secret.name=mcp-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=mcp-nats
+        --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000001 --set relay.image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000003
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: "v3.19.0"
-      - run: >-
-          helm lint deploy/chart --set database.secret.name=mcp-database --set nats.url=tls://nats:4222 --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer --set nats.tls.caSecret.name=nats-ca
-          --set relay.database.secret.name=mcp-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=mcp-nats
-      - run: >-
-          helm template anvilkit-agent-mcp deploy/chart --set database.secret.name=mcp-database --set nats.url=tls://nats:4222 --set identity.trustDomain=ci.example --set identity.certificate.issuerRef.name=ci-issuer --set nats.tls.caSecret.name=nats-ca
-          --set relay.database.secret.name=mcp-relay-database --set relay.queue.secret.name=queue-valkey --set nats.credentials.secret.name=mcp-nats > /dev/null
+      - run: helm lint deploy/chart $CHART_SETS
+      - run: helm template anvilkit-agent-mcp deploy/chart $CHART_SETS > /dev/null
+      - name: Refuse a tag-only image outside development (RB-S10)
+        run: |
+          for unset in image.digest relay.image.digest; do
+            if out=$(helm template anvilkit-agent-mcp deploy/chart $CHART_SETS --set "$unset=" 2>&1); then
+              echo "rendered a tag-only image outside development ($unset)"; exit 1
+            fi
+            echo "$out" | grep -q "$unset is required outside development" || { echo "$out"; exit 1; }
+          done
+          # The development guard keeps the tags (DEVELOPMENT_ONLY).
+          helm template anvilkit-agent-mcp deploy/chart $CHART_SETS --set image.digest= --set relay.image.digest= --set development.enabled=true > /dev/null
