@@ -252,10 +252,43 @@ func (a *Authority) token(ctx context.Context, resource, issuer, cacheKey string
 	if err != nil {
 		return "", fmt.Errorf("%w: token: %v", ErrAuthority, err)
 	}
+	// RB-S03: a token granting more than the reviewed credential requests
+	// is refused before it is cached or used.
+	if err := withinScopes(tok, cred.Scopes); err != nil {
+		return "", err
+	}
 	a.mu.Lock()
 	a.cache[key] = cachedToken{token: tok, key: cacheKey, resource: resource}
 	a.mu.Unlock()
 	return tok.AccessToken, nil
+}
+
+// withinScopes checks the scope an authorization server granted against the
+// reviewed credential's request (RFC 6749 §3.3, §5.1). An omitted scope is
+// the requested one; otherwise every granted scope must be one the
+// credential requests. A narrower grant is used as issued, and the upstream
+// refuses what it lacks. A default scope the server applies beyond the
+// request is refused as well: the reviewed credential names every scope MCP
+// may hold. The granted scopes are upstream text and never enter the error.
+func withinScopes(tok *oauth2.Token, requested []string) error {
+	raw := tok.Extra("scope")
+	if raw == nil {
+		return nil
+	}
+	granted, ok := raw.(string)
+	if !ok {
+		return fmt.Errorf("%w: the token response's scope is not a string", ErrAuthority)
+	}
+	wider := 0
+	for _, s := range strings.Fields(granted) {
+		if !slices.Contains(requested, s) {
+			wider++
+		}
+	}
+	if wider > 0 {
+		return fmt.Errorf("%w: the token grants %d scope(s) the reviewed credential does not request", ErrAuthority, wider)
+	}
+	return nil
 }
 
 // EvictGrant drops the tokens cached under a grant's cache key (P2.8: a
