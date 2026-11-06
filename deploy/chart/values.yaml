@@ -175,7 +175,9 @@ roles:
 # one entry per protected resource, {resource, issuer, clientId, secretKey,
 # scopes}; the chart renders the binding list (no secret in it) and each
 # client secret is a file: the CSI key upstream-<secretKey>, or the key
-# <secretKey> of upstream.secret.name.
+# <secretKey> of upstream.secret.name. scopes names every scope MCP may
+# hold: a token granting more, a server default beyond an empty list
+# included, is refused (RB-S03).
 upstream:
   credentials: []
   secret:
