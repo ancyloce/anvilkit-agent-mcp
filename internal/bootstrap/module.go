@@ -100,7 +100,7 @@ func Module() fx.Option {
 				if len(routes) == 0 {
 					log.Warn("no qualified tool routes: every tool call is refused (calls.qualified_routes empty)")
 				}
-				ups := map[string]application.Upstream{upstream.SDKRoute: upstream.NewRoute(eg.client, version, c.MaxResponseBytes)}
+				ups := map[string]application.Upstream{upstream.SDKRoute: upstream.NewRoute(eg.client, version, c.MaxResponseBytes).CountRefusals(metrics.EgressRefusals)}
 				return application.NewCalls(store, dispatch, ups, eg.authority, routes, application.CallOptions{
 					SendTimeout: c.SendTimeout, Wait: c.Wait, ReconcileAge: c.ReconcileAge, ReconcileBatch: 50,
 					// Operator-pending UNKNOWN calls are asked about at Control once per reconcile_age, not every pass.
@@ -202,10 +202,12 @@ type egress struct {
 // version is the implementation version MCP announces upstream.
 const version = "0.1.0"
 
-func newEgress(gen config.Generation, log *slog.Logger) (*egress, error) {
+func newEgress(gen config.Generation, metrics *application.Metrics, log *slog.Logger) (*egress, error) {
 	guard := upstream.Guard{
 		Policy:   application.NetworkPolicy{AllowedHosts: gen.Config.Catalog.AllowedHosts, PrivateHosts: gen.Config.Catalog.PrivateHosts},
 		Resolver: application.SystemResolver,
+		// RB-A26: every refused hop of discovery, authorization and calls.
+		Refusals: metrics.EgressRefusals,
 	}
 	client := guard.Client(gen.Config.Calls.MaxResponseBytes, gen.Config.Calls.SendTimeout)
 	creds, err := loadCredentials(gen.Config.Calls.CredentialsFile)
