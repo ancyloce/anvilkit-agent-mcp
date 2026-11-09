@@ -27,11 +27,28 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/application"
 )
 
 // ErrEgress marks a hop the network policy refused; nothing was sent to it.
 var ErrEgress = errors.New("EGRESS_REFUSED")
+
+// refuse counts a refused hop under its reason (application.EgressRefusalReasons;
+// counter may be nil) and returns ErrEgress with the detail.
+func refuse(counter *prometheus.CounterVec, reason, format string, args ...any) error {
+	countRefusal(counter, reason)
+	return fmt.Errorf("%w: "+format, append([]any{ErrEgress}, args...)...)
+}
+
+// countRefusal counts one refused hop under its reason; a nil counter counts
+// nothing.
+func countRefusal(counter *prometheus.CounterVec, reason string) {
+	if counter != nil {
+		counter.WithLabelValues(reason).Inc()
+	}
+}
 
 // Guard is the network policy applied at connection time.
 type Guard struct {
@@ -41,6 +58,9 @@ type Guard struct {
 	// TLS is the client configuration of https hops (nil: the platform
 	// roots). It never enables HTTP/2: see Client.
 	TLS *tls.Config
+	// Refusals counts every hop the guard refuses, by reason
+	// (anvilkit_mcp_egress_refusals_total; nil counts nothing).
+	Refusals *prometheus.CounterVec
 }
 
 // DialContext resolves the host, checks every address, dials the checked
@@ -48,21 +68,21 @@ type Guard struct {
 func (g Guard) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEgress, err)
+		return nil, refuse(g.Refusals, application.EgressMalformed, "%v", err)
 	}
 	private, err := g.Policy.CheckHost(host)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEgress, err)
+		return nil, refuse(g.Refusals, application.EgressHostNotAllowed, "%v", err)
 	}
 	var addrs []netip.Addr
 	if a, perr := netip.ParseAddr(strings.Trim(host, "[]")); perr == nil {
 		addrs = []netip.Addr{a}
 	} else if addrs, err = g.Resolver.LookupNetIP(ctx, "ip", host); err != nil || len(addrs) == 0 {
-		return nil, fmt.Errorf("%w: host %s does not resolve", ErrEgress, host)
+		return nil, refuse(g.Refusals, application.EgressUnresolved, "host %s does not resolve", host)
 	}
 	for _, a := range addrs {
 		if err := application.CheckAddr(host, a, private); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrEgress, err)
+			return nil, refuse(g.Refusals, application.EgressAddress, "%v", err)
 		}
 	}
 	d := g.Dialer
@@ -79,7 +99,7 @@ func (g Guard) DialContext(ctx context.Context, network, addr string) (net.Conn,
 		peer, perr := netip.ParseAddrPort(conn.RemoteAddr().String())
 		if perr != nil || peer.Addr().Unmap() != a.Unmap() || application.CheckAddr(host, peer.Addr(), private) != nil {
 			conn.Close()
-			return nil, fmt.Errorf("%w: host %s connected to %s, not the checked %s", ErrEgress, host, conn.RemoteAddr(), a)
+			return nil, refuse(g.Refusals, application.EgressPeerMismatch, "host %s connected to %s, not the checked %s", host, conn.RemoteAddr(), a)
 		}
 		return conn, nil
 	}
@@ -115,7 +135,7 @@ func (g Guard) Client(maxBody int64, timeout time.Duration) *http.Client {
 			ResponseHeaderTimeout: timeout, MaxResponseHeaderBytes: 64 << 10,
 		}},
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			return fmt.Errorf("%w: redirect to %s refused", ErrEgress, req.URL.Redacted())
+			return refuse(g.Refusals, application.EgressRedirect, "redirect to %s refused", req.URL.Redacted())
 		},
 	}
 }
@@ -129,13 +149,13 @@ type guardedTransport struct {
 func (t *guardedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	private, err := t.guard.Policy.CheckHost(req.URL.Hostname())
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEgress, err)
+		return nil, refuse(t.guard.Refusals, application.EgressHostNotAllowed, "%v", err)
 	}
 	if req.URL.Scheme != "https" && !(private && req.URL.Scheme == "http") {
-		return nil, fmt.Errorf("%w: scheme %s for %s", ErrEgress, req.URL.Scheme, req.URL.Host)
+		return nil, refuse(t.guard.Refusals, application.EgressScheme, "scheme %s for %s", req.URL.Scheme, req.URL.Host)
 	}
 	if req.URL.User != nil {
-		return nil, fmt.Errorf("%w: credentials in a URL", ErrEgress)
+		return nil, refuse(t.guard.Refusals, application.EgressUserinfo, "credentials in a URL")
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {

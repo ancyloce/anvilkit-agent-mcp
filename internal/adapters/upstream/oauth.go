@@ -140,27 +140,36 @@ func (a *Authority) Issuer(ctx context.Context, resource string) (string, error)
 // anything contacts it: reviewed host, https (http only for a private
 // host), resolvable to allowed addresses only.
 func (a *Authority) checkURL(ctx context.Context, raw string) error {
+	// Each refusal is also counted with the guard's egress reasons (RB-A26):
+	// a substituted endpoint is refused before anything contacts it.
+	refused := func(reason string, err error) error {
+		countRefusal(a.guard.Refusals, reason)
+		return err
+	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil {
-		return fmt.Errorf("%w: URL %q", ErrAuthority, raw)
+	if err != nil || u.Host == "" {
+		return refused(application.EgressMalformed, fmt.Errorf("%w: URL %q", ErrAuthority, raw))
+	}
+	if u.User != nil {
+		return refused(application.EgressUserinfo, fmt.Errorf("%w: URL %q", ErrAuthority, raw))
 	}
 	private, err := a.guard.Policy.CheckHost(u.Hostname())
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrAuthority, err)
+		return refused(application.EgressHostNotAllowed, fmt.Errorf("%w: %v", ErrAuthority, err))
 	}
 	if u.Scheme != "https" && !(private && u.Scheme == "http") {
-		return fmt.Errorf("%w: scheme of %q", ErrAuthority, raw)
+		return refused(application.EgressScheme, fmt.Errorf("%w: scheme of %q", ErrAuthority, raw))
 	}
 	host := u.Hostname()
 	var addrs []netip.Addr
 	if ip, perr := netip.ParseAddr(host); perr == nil {
 		addrs = []netip.Addr{ip}
 	} else if addrs, err = a.guard.Resolver.LookupNetIP(ctx, "ip", host); err != nil || len(addrs) == 0 {
-		return fmt.Errorf("%w: host %s does not resolve", ErrAuthority, host)
+		return refused(application.EgressUnresolved, fmt.Errorf("%w: host %s does not resolve", ErrAuthority, host))
 	}
 	for _, ip := range addrs {
 		if err := application.CheckAddr(host, ip, private); err != nil {
-			return fmt.Errorf("%w: %v", ErrAuthority, err)
+			return refused(application.EgressAddress, fmt.Errorf("%w: %v", ErrAuthority, err))
 		}
 	}
 	return nil

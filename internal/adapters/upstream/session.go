@@ -14,6 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/application"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/domain"
@@ -30,6 +31,7 @@ type Route struct {
 	client   *http.Client
 	version  string
 	maxBytes int64
+	refusals *prometheus.CounterVec
 }
 
 // SDKRoute is the route's name in the qualification list.
@@ -46,6 +48,14 @@ func NewRoute(client *http.Client, version string, maxBytes int64) *Route {
 	return &Route{client: client, version: version, maxBytes: maxBytes}
 }
 
+// CountRefusals counts the route's own refusals (a resource outside the
+// revision's network scope, or one that does not parse) in counter, the
+// guard's anvilkit_mcp_egress_refusals_total (RB-A26).
+func (r *Route) CountRefusals(counter *prometheus.CounterVec) *Route {
+	r.refusals = counter
+	return r
+}
+
 // Open connects, checks the negotiated protocol version and the reviewed
 // revision's lock (P2.5): the live server's name and version
 // (DESCRIPTOR_DRIFT), the method's input and output schemas (SCHEMA_DRIFT)
@@ -56,6 +66,7 @@ func NewRoute(client *http.Client, version string, maxBytes int64) *Route {
 func (r *Route) Open(ctx context.Context, t application.UpstreamTarget) (application.UpstreamSession, error) {
 	u, err := url.Parse(t.Resource)
 	if err != nil {
+		countRefusal(r.refusals, application.EgressMalformed)
 		return nil, qualify(domain.CallEgressRefused, err)
 	}
 	scope := t.NetworkScope
@@ -63,12 +74,12 @@ func (r *Route) Open(ctx context.Context, t application.UpstreamTarget) (applica
 		scope = []string{strings.ToLower(u.Hostname())}
 	}
 	if !application.HostInScope(u.Hostname(), scope) {
-		return nil, qualify(domain.CallEgressRefused, fmt.Errorf("%w: resource host %s is outside the revision's network scope", ErrEgress, u.Hostname()))
+		return nil, qualify(domain.CallEgressRefused, refuse(r.refusals, application.EgressOutOfScope, "resource host %s is outside the revision's network scope", u.Hostname()))
 	}
 	// The token's audience is the resource; it goes to that origin only.
 	origin := u.Scheme + "://" + u.Host
 	httpClient := WithBearer(r.client, origin, t.Token)
-	httpClient.Transport = &scoped{base: httpClient.Transport, scope: scope}
+	httpClient.Transport = &scoped{base: httpClient.Transport, scope: scope, refusals: r.refusals}
 	// The SDK reports a body cut by the bound as a generic transport failure;
 	// the session's own transport records the fact (a response whose headers
 	// arrived and whose body exceeded the bound) so Send can classify it.
@@ -140,13 +151,14 @@ func (r *Route) Open(ctx context.Context, t application.UpstreamTarget) (applica
 // before anything is written (the guard's allowlist and address rules
 // still apply beneath it).
 type scoped struct {
-	base  http.RoundTripper
-	scope []string
+	base     http.RoundTripper
+	scope    []string
+	refusals *prometheus.CounterVec
 }
 
 func (s *scoped) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !application.HostInScope(req.URL.Hostname(), s.scope) {
-		return nil, fmt.Errorf("%w: host %s is outside the revision's network scope", ErrEgress, req.URL.Hostname())
+		return nil, refuse(s.refusals, application.EgressOutOfScope, "host %s is outside the revision's network scope", req.URL.Hostname())
 	}
 	return s.base.RoundTrip(req)
 }
