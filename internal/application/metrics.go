@@ -41,7 +41,31 @@ type Metrics struct {
 	// P3.6 (platform.md SLO row 3): the revocation barrier's milestones in
 	// seconds from the revocation's commit, by stage (fenced, converged).
 	RevocationSeconds *prometheus.HistogramVec
+	// RB-A26 (the MCP revocation/SSRF incident): hops MCP's own egress
+	// refused before anything was sent, by reason (EgressRefusalReasons).
+	EgressRefusals *prometheus.CounterVec
 }
+
+// EgressRefusalReasons is the closed label vocabulary of
+// anvilkit_mcp_egress_refusals_total: why a hop of discovery, authorization
+// or a tool call was refused before it was sent. No host, address, tenant or
+// server is ever a label value.
+var EgressRefusalReasons = []string{
+	EgressMalformed, EgressHostNotAllowed, EgressUnresolved, EgressAddress,
+	EgressPeerMismatch, EgressScheme, EgressUserinfo, EgressRedirect, EgressOutOfScope,
+}
+
+const (
+	EgressMalformed      = "malformed"        // an address or URL that does not parse
+	EgressHostNotAllowed = "host_not_allowed" // a host outside the reviewed allowlist
+	EgressUnresolved     = "unresolved"       // a host that does not resolve
+	EgressAddress        = "address"          // a metadata, link-local or (for a public host) private address
+	EgressPeerMismatch   = "peer_mismatch"    // the connected peer is not the checked address (rebinding)
+	EgressScheme         = "scheme"           // plain http to a public host
+	EgressUserinfo       = "userinfo"         // credentials in a URL
+	EgressRedirect       = "redirect"         // any redirect
+	EgressOutOfScope     = "out_of_scope"     // a host outside the reviewed revision's network scope
+)
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
@@ -72,8 +96,14 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		RevocationSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "anvilkit_mcp_grant_revocation_seconds",
 			Help:    "Seconds from a grant revocation's commit to Control's fence (stage fenced: no new tool admission) and to REVOKED (stage converged: every sender converged), observed once per revocation.",
 			Buckets: prometheus.ExponentialBuckets(0.01, 2, 22)}, []string{"stage"}),
+		EgressRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "anvilkit_mcp_egress_refusals_total", Help: "Upstream hops (discovery, authorization, tool call) MCP's egress refused before sending, by reason (malformed, host_not_allowed, unresolved, address, peer_mismatch, scheme, userinfo, redirect, out_of_scope)."}, []string{"reason"}),
 	}
-	for _, c := range []prometheus.Collector{m.Requests, m.Claims, m.Submissions, m.LeaseOverruns, m.OverdueRetries, m.OutboxOldest, m.Forwarded, m.ForwardFailures, m.ConfigGeneration, m.ConfigRejections, m.ConfigRotations, m.DrainSeconds, m.ForcedStop, m.PoolAcquired, m.PoolTotal, m.DispatchQueries, m.GrantTransitions, m.CallTransitions, m.EventProjections, m.UnknownCalls, m.RestrictedServers, m.UnknownOldest, m.RestrictedRefusals, m.DeliveryPruned, m.RevocationSeconds} {
+	// Every reason's series exists from the start, so an increase is visible
+	// from the first refusal.
+	for _, r := range EgressRefusalReasons {
+		m.EgressRefusals.WithLabelValues(r)
+	}
+	for _, c := range []prometheus.Collector{m.Requests, m.Claims, m.Submissions, m.LeaseOverruns, m.OverdueRetries, m.OutboxOldest, m.Forwarded, m.ForwardFailures, m.ConfigGeneration, m.ConfigRejections, m.ConfigRotations, m.DrainSeconds, m.ForcedStop, m.PoolAcquired, m.PoolTotal, m.DispatchQueries, m.GrantTransitions, m.CallTransitions, m.EventProjections, m.UnknownCalls, m.RestrictedServers, m.UnknownOldest, m.RestrictedRefusals, m.DeliveryPruned, m.RevocationSeconds, m.EgressRefusals} {
 		reg.MustRegister(c)
 	}
 	return m
