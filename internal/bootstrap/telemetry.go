@@ -21,17 +21,17 @@ import (
 // telemetry.otlp_tls: tls or mtls, plaintext only with the development
 // guard) or nowhere. The gRPC server and Control client stats handlers use
 // it through the global provider; the stop hook flushes within the stop
-// deadline.
-func startTracing(lc fx.Lifecycle, gen config.Generation) error {
+// deadline, before w's Reloaders stop.
+func startTracing(lc fx.Lifecycle, gen config.Generation, w *workloadIdentity) error {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	if gen.Config.Telemetry.OTLPEndpoint == "" {
 		return nil
 	}
-	transport, err := clientTransport("telemetry.otlp_tls", gen.Config.Telemetry.OTLPTLS, gen.Config.Development.Enabled, slog.Default())
+	creds, err := w.otlpCredentials(gen.Config.Telemetry.OTLPTLS, gen.Config.Development.Enabled, slog.Default())
 	if err != nil {
 		return err
 	}
-	exporter, err := otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(gen.Config.Telemetry.OTLPEndpoint), otlptracegrpc.WithDialOption(transport))
+	exporter, err := otlptracegrpc.New(context.Background(), otlptracegrpc.WithEndpoint(gen.Config.Telemetry.OTLPEndpoint), creds)
 	if err != nil {
 		return err
 	}

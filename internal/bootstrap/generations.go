@@ -20,16 +20,21 @@ import (
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/application"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/config"
 	"github.com/ancyloce/anvilkit-agent-mcp/internal/domain"
+	"github.com/ancyloce/anvilkit-agent-mcp/internal/transport/identity"
 )
 
 // runtime is what one configuration generation owns: its pool and, when
-// enabled, its forwarder (bound to that pool and its own NATS connection).
+// enabled, its forwarder (bound to that pool and its own NATS connection)
+// with the NATS client certificate's Reloader under mtls. The outbox section
+// is reloadable, so that Reloader is the generation's own: polled from
+// activation to retirement, never started for a rejected candidate.
 type runtime struct {
-	gen       config.Generation
-	pool      *pgxpool.Pool
-	forwarder *outbox.Forwarder
-	fwdCancel context.CancelFunc
-	fwdDone   chan struct{}
+	gen          config.Generation
+	pool         *pgxpool.Pool
+	forwarder    *outbox.Forwarder
+	natsIdentity *identity.Reloader
+	fwdCancel    context.CancelFunc
+	fwdDone      chan struct{}
 }
 
 // Generations builds, probes, publishes and drains configuration
@@ -103,7 +108,7 @@ func buildRuntime(ctx context.Context, gen config.Generation, metrics *applicati
 				return nil, errors.New("outbox.nats.tls: development mode without development.enabled")
 			}
 			log.Warn("DEVELOPMENT_ONLY plaintext transport", "connection", "nats")
-		} else if natsTLS, err = clientTLSConfig("outbox.nats.tls", o.NATS.TLS, log); err != nil {
+		} else if natsTLS, rt.natsIdentity, err = clientTLSConfig("outbox.nats.tls", o.NATS.TLS, cfg.GRPC.Identity.ReloadInterval, log); err != nil {
 			return nil, err
 		}
 		rt.forwarder, err = outbox.NewForwarder(pool, outbox.ForwarderConfig{
@@ -119,9 +124,12 @@ func buildRuntime(ctx context.Context, gen config.Generation, metrics *applicati
 }
 
 // startForwarder runs the generation's forwarder and, over its connection,
-// the replica's event consumer (P2.8: the credential projection); both
-// stop when the generation retires.
+// the replica's event consumer (P2.8: the credential projection), and polls
+// its NATS identity; all stop when the generation retires.
 func (rt *runtime) startForwarder(log *slog.Logger, consume func(context.Context, []byte)) {
+	if rt.natsIdentity != nil {
+		rt.natsIdentity.Start()
+	}
 	if rt.forwarder == nil {
 		return
 	}
@@ -146,19 +154,27 @@ func (rt *runtime) startForwarder(log *slog.Logger, consume func(context.Context
 	go func() { wg.Wait(); close(rt.fwdDone) }()
 }
 
-// retire stops the generation's forwarder and drains its pool within the
-// limit; a pool still holding connections after the limit is reported as
-// a forced close (the connections belong to transactions that will fail
-// when they next touch it).
+// retire stops the generation's forwarder and its NATS identity and drains
+// its pool within the limit; a pool still holding connections after the
+// limit is reported as a forced close (the connections belong to
+// transactions that will fail when they next touch it). A runtime that was
+// never activated (a failed start) retires the same way.
 func (rt *runtime) retire(limit time.Duration, log *slog.Logger) (forced bool) {
 	if rt.forwarder != nil {
-		rt.fwdCancel()
-		_ = rt.forwarder.Close()
-		select {
-		case <-rt.fwdDone:
-		case <-time.After(limit):
-			forced = true
+		if rt.fwdCancel != nil {
+			rt.fwdCancel()
 		}
+		_ = rt.forwarder.Close()
+		if rt.fwdDone != nil {
+			select {
+			case <-rt.fwdDone:
+			case <-time.After(limit):
+				forced = true
+			}
+		}
+	}
+	if rt.natsIdentity != nil {
+		rt.natsIdentity.Stop()
 	}
 	done := make(chan struct{})
 	go func() { rt.pool.Close(); close(done) }()

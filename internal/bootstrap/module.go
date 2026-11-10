@@ -107,13 +107,17 @@ func Module() fx.Option {
 					ResolveInterval: c.ReconcileAge,
 				}, clock, metrics, log).WithAuthorizer(authz)
 			},
-			func(gen config.Generation, log *slog.Logger) (*workloadIdentity, error) {
-				return newWorkloadIdentity(gen.Config, log)
-			},
-			func(lc fx.Lifecycle, gen config.Generation, w *workloadIdentity, tasks *application.Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls, refresh *application.Refresh) (*grpctransport.Server, error) {
-				if w.reloader != nil {
-					lc.Append(fx.Hook{OnStart: func(context.Context) error { w.reloader.Start(); return nil }, OnStop: func(context.Context) error { w.reloader.Stop(); return nil }})
+			// The listener, Control and OTLP Reloaders poll from start to
+			// stop; their hook precedes every consumer's, so it stops last.
+			func(lc fx.Lifecycle, gen config.Generation, log *slog.Logger) (*workloadIdentity, error) {
+				w, err := newWorkloadIdentity(gen.Config, log)
+				if err != nil {
+					return nil, err
 				}
+				w.followLifecycle(lc)
+				return w, nil
+			},
+			func(gen config.Generation, w *workloadIdentity, tasks *application.Tasks, catalog *application.Catalog, grants *application.Grants, calls *application.Calls, refresh *application.Refresh) (*grpctransport.Server, error) {
 				return grpctransport.NewServerWithIdentity(gen.Config.GRPC.Listen, w.server(gen.Config), gen.Config.GRPC.Capacity, tasks, catalog, grants, calls, grpctransport.WithRefresh(refresh))
 			},
 			func(gen config.Generation, reg *prometheus.Registry) *Health {
