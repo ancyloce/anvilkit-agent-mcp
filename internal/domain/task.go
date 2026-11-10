@@ -412,6 +412,10 @@ type SubmitDecision struct {
 	Changed        bool
 }
 
+// errNoRecord: the owner has recorded no expectation for this generation
+// (its observation never ran): the submission is a profile mismatch.
+var errNoRecord = errors.New("no recorded expectation")
+
 // DecideSubmit accepts or refuses a result under the owner's CAS (DD-09
 // §1): the current generation, the current claimant with a valid lease,
 // the frozen input digest, the result profile and the current
@@ -419,18 +423,10 @@ type SubmitDecision struct {
 // acceptance; a superseded or expired claimant is refused without touching
 // the row; a digest mismatch is a caller error; a profile mismatch or a
 // reported failure consumes the attempt (retry or dead); a revoked
-// authorization cancels the request.
-func DecideSubmit(t Task, current Attempt, sub Submission, auth AuthorizationState, now time.Time, bounds Bounds) (SubmitDecision, error) {
-	return DecideSubmitRecorded(t, current, sub, auth, now, bounds, nil)
-}
-
-// errNoRecord: the owner has recorded no expectation for this generation
-// (its observation never ran): the submission is a profile mismatch.
-var errNoRecord = errors.New("no recorded expectation")
-
-// DecideSubmitRecorded is DecideSubmit for a profile whose expectation the
-// owner recorded (CatalogRefreshProfile); recorded is nil when none exists.
-func DecideSubmitRecorded(t Task, current Attempt, sub Submission, auth AuthorizationState, now time.Time, bounds Bounds, recorded *RecordedResult) (SubmitDecision, error) {
+// authorization cancels the request. recorded is the owner's recorded
+// expectation for a profile that has one (CatalogRefreshProfile), nil when
+// none exists.
+func DecideSubmit(t Task, current Attempt, sub Submission, auth AuthorizationState, now time.Time, bounds Bounds, recorded *RecordedResult) (SubmitDecision, error) {
 	if !digestPattern.MatchString(sub.InputDigest) {
 		return SubmitDecision{}, fmt.Errorf("%w: input digest", ErrInvalid)
 	}

@@ -354,7 +354,7 @@ func (t *Tasks) Submit(ctx context.Context, taskID string, generation uint64, su
 				return err
 			}
 		}
-		d, err := domain.DecideSubmitRecorded(current, currentAttempt(current, attempts), sub, auth, now, t.Bounds(), recorded)
+		d, err := domain.DecideSubmit(current, currentAttempt(current, attempts), sub, auth, now, t.Bounds(), recorded)
 		if err != nil {
 			return err
 		}

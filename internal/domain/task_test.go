@@ -83,7 +83,7 @@ func TestClaimFencesAndRaces(t *testing.T) {
 		t.Fatalf("stale heartbeat: %v", err)
 	}
 	ref, digest, _ := ExpectedResult(task)
-	if _, err := DecideSubmit(d2.Task, d2.Attempt, Submission{WorkerID: "w1", InputDigest: task.InputDigest, Succeeded: true, ResultRef: ref, ResultDigest: digest}, AuthorizationCurrent, later, bounds); !errors.Is(err, ErrStaleExecution) {
+	if _, err := DecideSubmit(d2.Task, d2.Attempt, Submission{WorkerID: "w1", InputDigest: task.InputDigest, Succeeded: true, ResultRef: ref, ResultDigest: digest}, AuthorizationCurrent, later, bounds, nil); !errors.Is(err, ErrStaleExecution) {
 		t.Fatalf("stale submit: %v", err)
 	}
 	// Attempts are bounded: a third claim is refused.
@@ -111,38 +111,38 @@ func TestSubmitAcceptanceRules(t *testing.T) {
 	// Digest mismatch is a caller error and changes nothing.
 	bad := good
 	bad.InputDigest = "sha256:" + "0000000000000000000000000000000000000000000000000000000000000000"
-	if _, err := DecideSubmit(d.Task, d.Attempt, bad, AuthorizationCurrent, now, bounds); !errors.Is(err, ErrInvalid) {
+	if _, err := DecideSubmit(d.Task, d.Attempt, bad, AuthorizationCurrent, now, bounds, nil); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("digest mismatch: %v", err)
 	}
 	// Profile mismatch consumes the attempt (retry, then dead).
 	wrong := good
 	wrong.ResultDigest = "sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
-	pm, err := DecideSubmit(d.Task, d.Attempt, wrong, AuthorizationCurrent, now, bounds)
+	pm, err := DecideSubmit(d.Task, d.Attempt, wrong, AuthorizationCurrent, now, bounds, nil)
 	if err != nil || pm.Accepted || pm.Task.State != StateRetryScheduled || pm.Task.FailureCode != FailureProfileMismatch || pm.AttemptOutcome != AttemptFailed {
 		t.Fatalf("profile mismatch: %v %+v", err, pm)
 	}
 	// Revoked authorization cancels.
-	rv, err := DecideSubmit(d.Task, d.Attempt, good, AuthorizationRevoked, now, bounds)
+	rv, err := DecideSubmit(d.Task, d.Attempt, good, AuthorizationRevoked, now, bounds, nil)
 	if err != nil || rv.Accepted || rv.Task.State != StateCanceled || rv.Task.FailureCode != FailureAuthorizationRevoked {
 		t.Fatalf("revoked: %v %+v", err, rv)
 	}
 	// Acceptance, then the identical repeat returns the existing acceptance.
-	ok, err := DecideSubmit(d.Task, d.Attempt, good, AuthorizationCurrent, now, bounds)
+	ok, err := DecideSubmit(d.Task, d.Attempt, good, AuthorizationCurrent, now, bounds, nil)
 	if err != nil || !ok.Accepted || ok.Existing || ok.Task.State != StateAccepted || ok.Task.Revision != 3 {
 		t.Fatalf("accept: %v %+v", err, ok)
 	}
-	again, err := DecideSubmit(ok.Task, d.Attempt, good, AuthorizationCurrent, now.Add(time.Hour), bounds)
+	again, err := DecideSubmit(ok.Task, d.Attempt, good, AuthorizationCurrent, now.Add(time.Hour), bounds, nil)
 	if err != nil || !again.Accepted || !again.Existing || again.Changed {
 		t.Fatalf("repeat: %v %+v", err, again)
 	}
 	other := good
 	other.ResultDigest = wrong.ResultDigest
-	if _, err := DecideSubmit(ok.Task, d.Attempt, other, AuthorizationCurrent, now, bounds); !errors.Is(err, ErrStaleExecution) {
+	if _, err := DecideSubmit(ok.Task, d.Attempt, other, AuthorizationCurrent, now, bounds, nil); !errors.Is(err, ErrStaleExecution) {
 		t.Fatalf("different result after acceptance: %v", err)
 	}
 	// A reported failure on the last attempt is dead.
 	d2, _ := DecideClaim(pm.Task, []Attempt{d.Attempt}, "w2", time.Minute, now.Add(time.Minute), bounds)
-	failed, err := DecideSubmit(d2.Task, d2.Attempt, Submission{WorkerID: "w2", InputDigest: task.InputDigest, Succeeded: false, FailureCode: "HANDLER_FAILED"}, AuthorizationCurrent, now.Add(time.Minute), bounds)
+	failed, err := DecideSubmit(d2.Task, d2.Attempt, Submission{WorkerID: "w2", InputDigest: task.InputDigest, Succeeded: false, FailureCode: "HANDLER_FAILED"}, AuthorizationCurrent, now.Add(time.Minute), bounds, nil)
 	if err != nil || failed.Task.State != StateDead || failed.Task.FailureCode != "HANDLER_FAILED" {
 		t.Fatalf("dead: %v %+v", err, failed)
 	}
