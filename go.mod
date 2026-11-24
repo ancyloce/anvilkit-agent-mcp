@@ -7,7 +7,7 @@ require (
 	github.com/ThreeDotsLabs/watermill v1.5.3
 	github.com/ThreeDotsLabs/watermill-nats/v2 v2.2.0
 	github.com/ThreeDotsLabs/watermill-sql/v4 v4.1.5
-	github.com/ancyloce/anvilkit-agent-contracts/go v0.1.18
+	github.com/ancyloce/anvilkit-agent-contracts/go v0.1.53
 	github.com/casbin/casbin/v2 v2.135.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/google/jsonschema-go v0.4.3
